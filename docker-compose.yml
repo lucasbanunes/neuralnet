@@ -6,8 +6,22 @@ services:
       dockerfile: Dockerfile
     image: ${DOCKER_USERNAME}/neuralnet:${DOCKER_TAG}
     container_name: neuralnet-container-${DOCKER_TAG}
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /home/user/workspaces/neuralnet
+    environment:
+      - KERAS_BACKEND=tensorflow
+      - HOME=/home/user
+      - UV_CACHE_DIR=/home/user/.cache/uv
     volumes:
-      - ./:/root/workspaces/neuralnet
-      - ~/logs:/root/logs
-      - ~/data:/root/data
+      - ./:/home/user/workspaces/neuralnet
+      - ~/.cache/uv:/home/user/.cache/uv
+      - ~/logs:/home/user/logs
+      - ~/data:/home/user/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     tty: true

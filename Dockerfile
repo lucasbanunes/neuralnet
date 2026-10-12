@@ -1,27 +1,54 @@
-FROM pytorch/pytorch:2.10.0-cuda13.0-cudnn9-runtime
+FROM nvidia/cuda:13.4.2-cudnn-runtime-ubuntu24.04
 
+# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get upgrade -y && apt-get clean
-# It takes a while to install this, implemented separately for caching
-# RUN apt-get install -y dvipng texlive-latex-extra texlive-fonts-recommended git && apt-get clean
-RUN apt-get install -y wget && apt-get clean
+# Install system dependencies (git for VCS dependencies, python3 for venv compatibility)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    sudo \
+    python3 \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
+# Install uv binary from official image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-WORKDIR /root
-COPY requirements.txt requirements.txt
-# Root only supports conda or binary installation
-# We install it with conda and the rest with pip
-# to have the most recent packages
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-py312_26.1.1-1-Linux-x86_64.sh -O /tmp/miniconda3.sh
-RUN bash /tmp/miniconda3.sh -b -p /opt/conda && \
-    rm /tmp/miniconda3.sh && \
-    /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
-    /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
-    /opt/conda/bin/conda init bash && \
-    /opt/conda/bin/conda config --set auto_activate_base false && \
-    /opt/conda/bin/conda config --set channel_priority strict && \
-    /opt/conda/bin/conda create -c conda-forge --name neuralnet root==6.36.06 python==3.12.12 -y && \
-    /opt/conda/bin/conda run -n neuralnet --live-stream pip install -r requirements.txt && \
-    rm requirements.txt
-ENV PATH="/opt/conda/bin:${PATH}"
+# Create default non-root user 'user' (UID 1000, GID 1000) with passwordless sudo
+ARG USERNAME=user
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN if id -u ${USER_UID} >/dev/null 2>&1; then \
+        EXISTING_USER=$(getent passwd ${USER_UID} | cut -d: -f1); \
+        if [ "$EXISTING_USER" != "${USERNAME}" ]; then \
+            userdel -r "$EXISTING_USER" 2>/dev/null || true; \
+        fi; \
+    fi && \
+    if getent group ${USER_GID} >/dev/null 2>&1; then \
+        EXISTING_GROUP=$(getent group ${USER_GID} | cut -d: -f1); \
+        if [ "$EXISTING_GROUP" != "${USERNAME}" ]; then \
+            groupdel "$EXISTING_GROUP" 2>/dev/null || true; \
+        fi; \
+    fi && \
+    groupadd -g ${USER_GID} ${USERNAME} 2>/dev/null || true && \
+    useradd -u ${USER_UID} -g ${USER_GID} -m -s /bin/bash ${USERNAME} 2>/dev/null || true && \
+    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Create workspace and cache directories with proper permissions
+RUN mkdir -p /home/user/workspaces/neuralnet /home/user/.cache/uv && \
+    chown -R user:user /home/user && \
+    chmod -R a+rwX /home/user
+
+# Environment settings
+ENV PYTHONUNBUFFERED=1 \
+    KERAS_BACKEND=tensorflow \
+    UV_CACHE_DIR=/home/user/.cache/uv \
+    PATH="/home/user/workspaces/neuralnet/.venv/bin:${PATH}"
+
+# Set working directory to the mounted workspace
+WORKDIR /home/user/workspaces/neuralnet
+
+USER user
