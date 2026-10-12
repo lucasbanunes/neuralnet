@@ -1,0 +1,27 @@
+@startuml specialist_committee_development_flow
+title Neural Ringer Specialist Committee Training Flow
+
+start
+
+:Export data from Tag & Probe;
+
+repeat :For each (et, eta) in committee intervals;
+  :Load data from (et, eta) intervals;
+  repeat :For each fold;
+    :Separate training and validation data;
+    repeat :For each initialization;
+      :Initialize model weights;
+      :Train model;
+      :Save results;
+    repeat while (next initialization)
+  repeat while (next fold)
+repeat while (next (et, eta))
+
+repeat :For each (et, eta) in committee intervals;
+  :Select best model for this interval
+  Model with the highest SP on the validation set;
+  :Select for committee;
+repeat while (next (et, eta))
+
+end
+@enduml
