@@ -207,7 +207,6 @@ def compute_norm_metrics(
     id_exprs = [pl.col("id")] if "id" in schema else []
 
     sample_diffs_df = df_lazy.select(
-        "id",
         *id_exprs,
         *sample_summary_exprs,
         *diff_exprs,
@@ -359,12 +358,12 @@ class AlternativeNorm1Analysis(YamlBaseModel):
         samples_info = f"- **Number of Samples**: {n_samples:,}\n" if n_samples is not None else ""
         features_info = f"- **Ring Features per Sample**: {n_features}\n" if n_features is not None else ""
         kfold_info = (
-            f"- **K-Fold Table**: `{self.kfold_table}`\n- **Fold**: {self.fold}\n- **Data Split**: `{self.data_group}`\n"
+            f"- **K-Fold Table**: `{self.kfold_table}`\n"
             if self.kfold_table
             else "- **K-Fold Splitting**: None (entire table used)\n"
         )
-        et_bin_info = f"- **ET Bin**: {self.et_bin}\n" if self.et_bin else ""
-        eta_bin_info = f"- **Eta Bin**: {self.eta_bin}\n" if self.eta_bin else ""
+        et_bin_info = f"- **ET Bins**: {self.et_bins}\n" if self.et_bins else ""
+        eta_bin_info = f"- **Eta Bins**: {self.eta_bins}\n" if self.eta_bins else ""
 
         first_ib = int_bits[0] if int_bits else 1
         first_fb = frac_bits[0] if frac_bits else 4
@@ -437,8 +436,8 @@ This analysis evaluates the impact of fixed-point arithmetic quantization on the
 ├── README.md               # This documentation file
 ├── config.json             # Full JSON configuration used to execute the analysis
 ├── results.csv             # Summary table with aggregated metrics across all bit configurations
-└── differences/            # Subdirectory containing sample-wise differences per bit configuration
-    ├── differences_ib_{first_ib}_fb_{first_fb}.parquet
+└── quantized/              # Subdirectory containing sample-wise differences per bit configuration
+    ├── quantized_ib_{first_ib:04d}_fb_{first_fb:04d}.parquet
     └── ...
 ```
 
@@ -450,8 +449,8 @@ A CSV table where each row corresponds to one `(integer_bits, fractional_bits)` 
 
 {results_schema_md}
 
-### 3.3. `differences/differences_ib_{first_ib}_fb_{first_fb}.parquet` Schema
-Each Parquet file in the `differences/` directory stores sample-wise and feature-wise evaluation for that specific bitwidth:
+### 3.3. `quantized/quantized_ib_{first_ib:04d}_fb_{first_fb:04d}.parquet` Schema
+Each Parquet file in the `quantized/` directory stores sample-wise and feature-wise evaluation for that specific bitwidth:
 
 {sample_diffs_schema_md}
 
@@ -484,7 +483,7 @@ import polars as pl
 results = pl.read_csv("results.csv")
 
 # Read per-sample differences
-diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.parquet")
+diffs = pl.read_parquet("quantized/quantized_ib_{first_ib:04d}_fb_{first_fb:04d}.parquet")
 ```
 """
 
@@ -523,14 +522,15 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
         output_dir.mkdir(parents=True, exist_ok=True)
         self.quantized_dir.mkdir(parents=True, exist_ok=True)
 
+        norm_schema_names = norm_df.collect_schema().names()
         output_columns = {"id"} | set(normalizer.output_cols)
         # if self.kfold_col:
         #     output_columns.add(self.kfold_col)
-        if self.et_col:
+        if self.et_col and self.et_col in norm_schema_names:
             output_columns.add(self.et_col)
-        if self.eta_col:
+        if self.eta_col and self.eta_col in norm_schema_names:
             output_columns.add(self.eta_col)
-        if self.label_col:
+        if self.label_col and self.label_col in norm_schema_names:
             output_columns.add(self.label_col)
 
         all_metric_dfs = []
@@ -549,12 +549,42 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
 
             quantized_metric_dfs = []
 
-            for et_bin, eta_bin in product(self.et_bins, self.eta_bins):
-                binned_df = quantized_df.filter(
-                    et_bin.as_polars_expr(self.et_col) & eta_bin.as_polars_expr(self.eta_col)
-                )
+            if self.et_bins is not None and self.eta_bins is not None:
+                for et_bin, eta_bin in product(self.et_bins, self.eta_bins):
+                    binned_df = quantized_df.filter(
+                        et_bin.as_polars_expr(self.et_col) & eta_bin.as_polars_expr(self.eta_col)
+                    )
+                    metrics_lf, _ = compute_norm_metrics(
+                        df=binned_df,
+                        norm_cols=norm_cols,
+                        quant_cols=quantized_normalizer.output_cols,
+                        eps=self.eps,
+                        hist_bins=self.hist_bins,
+                    )
+
+                    cfg_metrics_lf = metrics_lf.with_columns(
+                        pl.lit(ib).alias("integer_bits"),
+                        pl.lit(fb).alias("fractional_bits"),
+                        et_bin.as_polars_struct().alias("et_bin"),
+                        eta_bin.as_polars_struct().alias("eta_bin"),
+                    ).select(
+                        "integer_bits",
+                        "fractional_bits",
+                        # "data_group",
+                        "et_bin",
+                        "eta_bin",
+                        "mse",
+                        "rmse",
+                        "mae",
+                        "mape",
+                        "max_error",
+                        # "kl_divergence",
+                        # "hist_kl_divergence",
+                    )
+                    quantized_metric_dfs.append(cfg_metrics_lf)
+            else:
                 metrics_lf, _ = compute_norm_metrics(
-                    df=binned_df,
+                    df=quantized_df,
                     norm_cols=norm_cols,
                     quant_cols=quantized_normalizer.output_cols,
                     eps=self.eps,
@@ -564,21 +594,14 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
                 cfg_metrics_lf = metrics_lf.with_columns(
                     pl.lit(ib).alias("integer_bits"),
                     pl.lit(fb).alias("fractional_bits"),
-                    et_bin.as_polars_struct().alias("et_bin"),
-                    eta_bin.as_polars_struct().alias("eta_bin"),
                 ).select(
                     "integer_bits",
                     "fractional_bits",
-                    # "data_group",
-                    "et_bin",
-                    "eta_bin",
                     "mse",
                     "rmse",
                     "mae",
                     "mape",
                     "max_error",
-                    # "kl_divergence",
-                    # "hist_kl_divergence",
                 )
                 quantized_metric_dfs.append(cfg_metrics_lf)
 
@@ -590,7 +613,11 @@ diffs = pl.read_parquet("differences/differences_ib_{first_ib}_fb_{first_fb}.par
 
         if self.output_path is not None:
             output_dir = Path(self.output_path)
-            results_df.write_csv(output_dir / "results.csv")
+            csv_df = results_df
+            struct_cols = [c for c, dtype in results_df.schema.items() if dtype.is_nested()]
+            if struct_cols:
+                csv_df = results_df.with_columns([pl.col(c).struct.json_encode() for c in struct_cols])
+            csv_df.write_csv(output_dir / "results.csv")
             output_dir.joinpath("config.json").write_text(self.model_dump_json(indent=4))
             readme_content = self.generate_readme_content(
                 results_df=results_df,

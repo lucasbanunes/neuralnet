@@ -50,8 +50,6 @@ def test_compute_norm_metrics_perfect_match():
     assert metrics_df["mae"][0] == 0.0
     assert metrics_df["mape"][0] == 0.0
     assert metrics_df["max_error"][0] == 0.0
-    assert abs(metrics_df["kl_divergence"][0]) < 1e-6
-    assert abs(metrics_df["hist_kl_divergence"][0]) < 1e-6
 
     assert isinstance(diffs_df, pl.DataFrame)
     assert diffs_df.height == n_samples
@@ -111,40 +109,31 @@ def test_alternative_norm1_analysis_submit(tmp_path: Path):
     readme_text = (output_dir / "README.md").read_text()
     assert "AlternativeNorm1 Fixed-Point Quantization Analysis" in readme_text
     assert "results.csv" in readme_text
-    assert "differences/" in readme_text
-    differences_dir = output_dir / "differences"
-    assert differences_dir.exists()
+    assert "quantized/" in readme_text
+    quantized_dir = output_dir / "quantized"
+    assert quantized_dir.exists()
 
-    diff_files = list(differences_dir.glob("differences_ib_*_fb_*.parquet"))
+    diff_files = list(quantized_dir.glob("quantized_ib_*_fb_*.parquet"))
     assert len(diff_files) == 4
 
     sample_parquet = pl.read_parquet(diff_files[0])
     assert sample_parquet.height == n_samples
     assert "id" in sample_parquet.columns
-    assert "sample_mse" in sample_parquet.columns
-    assert "sample_mae" in sample_parquet.columns
-    assert "sample_mape" in sample_parquet.columns
-    assert "sample_max_error" in sample_parquet.columns
-    assert "sample_kl_divergence" in sample_parquet.columns
 
-    # Verify difference columns exist
+    # Verify normalized and quantized ring columns exist
     first_ring_col = "rings.0_alternative_norm1"
-    assert f"{first_ring_col}.diff" in sample_parquet.columns
-    assert f"{first_ring_col}.abs_diff" in sample_parquet.columns
-    assert f"{first_ring_col}.sq_diff" in sample_parquet.columns
-    assert f"{first_ring_col}.rel_diff" in sample_parquet.columns
+    quant_ring_col = "rings.0_quantized_alternative_norm1"
+    assert first_ring_col in sample_parquet.columns
+    assert quant_ring_col in sample_parquet.columns
 
     expected_cols = [
         "integer_bits",
         "fractional_bits",
-        "total_bits",
         "mse",
         "rmse",
         "mae",
         "mape",
         "max_error",
-        "kl_divergence",
-        "hist_kl_divergence",
     ]
     for col in expected_cols:
         assert col in results_df.columns
@@ -156,10 +145,7 @@ def test_alternative_norm1_analysis_submit(tmp_path: Path):
     maes = results_df["mae"].to_list()
     assert maes[0] > maes[1] > maes[2] > maes[3]
 
-    kls = results_df["kl_divergence"].to_list()
-    assert kls[0] > kls[1] > kls[2] > kls[3]
-
-    # Test load, results property, and get_diff_df method
+    # Test load, results property, and get_quantized_df method
     loaded_analysis = AlternativeNorm1Analysis.load(output_dir)
     assert loaded_analysis.rings_col == "rings"
     assert loaded_analysis.ring_fraction == 2
@@ -172,13 +158,13 @@ def test_alternative_norm1_analysis_submit(tmp_path: Path):
     assert results_collected.height == 4
     assert "mse" in results_collected.columns
 
-    # Test get_diff_df returns LazyFrame for specific (ib, fb)
-    diff_lazy = loaded_analysis.get_diff_df(integer_bits=1, fractional_bits=6)
+    # Test get_quantized_df returns LazyFrame for specific (ib, fb)
+    diff_lazy = loaded_analysis.get_quantized_df(integer_bits=1, fractional_bits=6)
     assert isinstance(diff_lazy, pl.LazyFrame)
     diff_collected = diff_lazy.collect()
     assert diff_collected.height == n_samples
-    assert "sample_mse" in diff_collected.columns
-    assert f"{first_ring_col}.abs_diff" in diff_collected.columns
+    assert first_ring_col in diff_collected.columns
+    assert quant_ring_col in diff_collected.columns
 
 
 def test_alternative_norm1_analysis_with_kfold(tmp_path: Path):
@@ -208,14 +194,16 @@ def test_alternative_norm1_analysis_with_kfold(tmp_path: Path):
 
     output_dir = tmp_path / "analysis_output"
 
+    from neuralnet.bins import Bin, AbsoluteBin
+
     analysis = AlternativeNorm1Analysis(
         dataset_dir=tmp_path,
         data_table="data.parquet",
         kfold_table="kfold.parquet",
         rings_col="rings",
         ring_fraction=2,
-        fold=0,
-        data_group="train",
+        et_bins=[Bin(low=0.0, high=100.0, closed="left")],
+        eta_bins=[AbsoluteBin(low=0.0, high=3.0, closed="left")],
         integer_bits_range=IntegerRange(start=1, stop=3),
         fractional_bits_range=IntegerRange(start=4, stop=7),
         output_path=output_dir,
@@ -224,15 +212,17 @@ def test_alternative_norm1_analysis_with_kfold(tmp_path: Path):
     results_df = analysis.submit()
     assert isinstance(results_df, pl.DataFrame)
     assert results_df.height == 6  # 2 int bits (1, 2) * 3 frac bits (4, 5, 6)
+    assert "et_bin" in results_df.columns
+    assert "eta_bin" in results_df.columns
     assert (output_dir / "results.csv").exists()
     assert (output_dir / "config.json").exists()
-    assert (output_dir / "differences").exists()
-    assert len(list((output_dir / "differences").glob("*.parquet"))) == 6
+    assert (output_dir / "quantized").exists()
+    assert len(list((output_dir / "quantized").glob("*.parquet"))) == 6
 
     loaded = AlternativeNorm1Analysis.load(output_dir)
-    assert loaded.data_group == "train"
+    assert loaded.kfold_table == "kfold.parquet"
     assert loaded.results.collect().height == 6
-    assert loaded.get_diff_df(1, 4).collect().height == analysis.get_data().collect().height
+    assert loaded.get_quantized_df(1, 4).collect().height == analysis.get_data().collect().height
 
 
 def test_alternative_norm1_markdown_schema():

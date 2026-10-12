@@ -1242,6 +1242,7 @@ def quadrant_plot(
         legend_kw.update(legend_kwargs)
     top_ax.legend(**legend_kw)
 
+    bottom_ax.set_xlabel(var_label, fontsize="small")
     bottom_ax.set_xlabel(var_label, fontsize="small", loc='left')
     bottom_ax.set_ylabel("Disagreement (%)", fontsize="small")
     bottom_ax.grid(linestyle="--", alpha=0.2, color="k")
@@ -1249,3 +1250,234 @@ def quadrant_plot(
     bottom_ax.tick_params(axis="y", which="both", labelsize="small")
 
     return fig, top_ax, bottom_ax, quadrant_data
+
+
+def hist_plot(
+    data: pl.DataFrame | pl.LazyFrame | pl.Series | np.ndarray | Iterable[float],
+    ax: plt.Axes | None = None,
+    col: str | None = None,
+    *,
+    bins: int | np.ndarray | Iterable[float] = 50,
+    density: bool = True,
+    config: QuadrantHistConfig | None = None,
+    color: str | None = None,
+    marker: str | None = None,
+    markersize: float | None = None,
+    alpha: float | None = None,
+    label: str | None = None,
+    hist_kwargs: dict | None = None,
+    scatter: bool | None = None,
+    **kwargs,
+) -> plt.Axes:
+    """Plot a histogram of a continuous variable onto a Matplotlib Axes.
+
+    Supports polars DataFrame, LazyFrame, Series, or array-like data. Visual
+    configuration can be supplied via a :class:`QuadrantHistConfig` dict or via
+    direct keyword arguments. If *marker* is specified (either directly or
+    through *config*), markers are plotted at the center of each bin using
+    :func:`matplotlib.axes.Axes.scatter` instead of drawing a step histogram.
+
+    Parameters
+    ----------
+    data : pl.DataFrame | pl.LazyFrame | pl.Series | np.ndarray | Iterable[float]
+        Data source containing the continuous variable to plot. If a DataFrame or
+        LazyFrame with multiple columns is provided, *col* must be specified.
+    ax : plt.Axes | None, optional
+        Matplotlib Axes to draw into. If None, uses the current axes (:func:`matplotlib.pyplot.gca`).
+    col : str | None, optional
+        Column name to extract when *data* is a DataFrame or LazyFrame.
+    bins : int | np.ndarray | Iterable[float], default=50
+        Number of histogram bins or explicit bin edges array.
+    density : bool, default=True
+        Whether to normalize the histogram to form a probability density.
+    config : QuadrantHistConfig | None, optional
+        Visual configuration dictionary matching :class:`QuadrantHistConfig`.
+        Supported keys: ``color``, ``marker``, ``markersize``, ``alpha``,
+        ``label``, ``hist_kwargs``. Explicit keyword arguments take precedence
+        over this dictionary.
+    color : str | None, optional
+        Color for the histogram step line or scatter markers.
+    marker : str | None, optional
+        Matplotlib marker style string (e.g. ``"o"``, ``"s"``, ``"^"``). When
+        provided, markers are plotted at the center of each bin instead of
+        drawing a step histogram.
+    markersize : float | None, optional
+        Marker size in points**2 (passed to ``s`` in scatter).
+    alpha : float | None, optional
+        Opacity for the step line or markers.
+    label : str | None, optional
+        Legend label for this distribution.
+    hist_kwargs : dict | None, optional
+        Additional keyword arguments forwarded to :func:`matplotlib.axes.Axes.hist`
+        or :func:`matplotlib.axes.Axes.scatter`.
+    scatter : bool | None, optional
+        Optional flag to force marker mode (``True``) or step histogram mode
+        (``False``). If omitted (``None``), marker mode is activated whenever
+        *marker* is specified.
+    **kwargs
+        Extra keyword arguments forwarded to the plotting call.
+
+    Returns
+    -------
+    plt.Axes
+        The Matplotlib Axes on which the histogram or scatter was plotted.
+    """
+    # ------------------------------------------------------------------
+    # Disambiguate positional arguments if needed
+    # ------------------------------------------------------------------
+    if isinstance(ax, str):
+        if col is None or isinstance(col, plt.Axes):
+            col, ax = ax, col
+    elif col is not None and isinstance(col, plt.Axes) and ax is None:
+        ax, col = col, None
+
+    if ax is None:
+        ax = plt.gca()
+
+    # ------------------------------------------------------------------
+    # Extract numerical array from data
+    # ------------------------------------------------------------------
+    if isinstance(data, pl.LazyFrame):
+        if col is not None:
+            arr = data.select(col).collect()[col].to_numpy()
+        else:
+            schema = data.collect_schema()
+            col_names = schema.names()
+            if len(col_names) == 1:
+                col = col_names[0]
+                arr = data.select(col).collect()[col].to_numpy()
+            else:
+                raise ValueError(
+                    f"When data is a LazyFrame with multiple columns ({col_names}), 'col' must be specified."
+                )
+    elif isinstance(data, pl.DataFrame):
+        if col is not None:
+            arr = data[col].to_numpy()
+        else:
+            if len(data.columns) == 1:
+                col = data.columns[0]
+                arr = data[col].to_numpy()
+            else:
+                raise ValueError(
+                    f"When data is a DataFrame with multiple columns ({data.columns}), 'col' must be specified."
+                )
+    elif isinstance(data, pl.Series):
+        if col is None:
+            col = data.name
+        arr = data.to_numpy()
+    else:
+        arr = np.asarray(data)
+
+    arr = arr.astype(float)
+    valid_mask = np.isfinite(arr)
+    arr = arr[valid_mask]
+
+    # ------------------------------------------------------------------
+    # Merge visual config and keyword arguments
+    # ------------------------------------------------------------------
+    cfg: QuadrantHistConfig = dict(config) if config is not None else {}
+
+    merged_hist_kw: dict = {}
+    if "hist_kwargs" in cfg and isinstance(cfg["hist_kwargs"], dict):
+        merged_hist_kw.update(cfg["hist_kwargs"])
+    if hist_kwargs is not None:
+        merged_hist_kw.update(hist_kwargs)
+    if kwargs:
+        merged_hist_kw.update(kwargs)
+
+    resolved_color = color if color is not None else cfg.get("color", merged_hist_kw.pop("color", None))
+    resolved_marker = marker if marker is not None else cfg.get("marker", merged_hist_kw.pop("marker", None))
+    resolved_markersize = markersize if markersize is not None else cfg.get("markersize", merged_hist_kw.pop("markersize", None))
+    resolved_alpha = alpha if alpha is not None else cfg.get("alpha", merged_hist_kw.pop("alpha", None))
+    resolved_label = label if label is not None else cfg.get("label", merged_hist_kw.pop("label", None))
+
+    density = merged_hist_kw.pop("density", density)
+    bins = merged_hist_kw.pop("bins", bins)
+
+    # Determine whether to plot markers or step histogram
+    is_marker_mode = (scatter is True) or (scatter is not False and resolved_marker is not None)
+
+    # ------------------------------------------------------------------
+    # Plotting
+    # ------------------------------------------------------------------
+    if is_marker_mode:
+        actual_marker = resolved_marker if resolved_marker is not None else "o"
+        edgecolors = merged_hist_kw.pop("edgecolors", merged_hist_kw.pop("edgecolor", "k"))
+        zorder = merged_hist_kw.pop("zorder", 3)
+        hist_only_keys = {"histtype", "align", "orientation", "rwidth", "log", "cumulative", "bottom"}
+        scatter_kw = {k: v for k, v in merged_hist_kw.items() if k not in hist_only_keys}
+
+        if len(arr) == 0:
+            ax.scatter(
+                [],
+                [],
+                color=resolved_color,
+                marker=actual_marker,
+                s=resolved_markersize,
+                edgecolors=edgecolors,
+                alpha=resolved_alpha,
+                label=resolved_label,
+                zorder=zorder,
+                **scatter_kw,
+            )
+            return ax
+
+        weights = merged_hist_kw.get("weights", None)
+        if isinstance(weights, str):
+            if isinstance(data, pl.LazyFrame):
+                weights = data.select(weights).collect()[weights].to_numpy()
+            elif isinstance(data, pl.DataFrame):
+                weights = data[weights].to_numpy()
+        if weights is not None:
+            weights = np.asarray(weights)
+            if len(weights) == len(valid_mask):
+                weights = weights[valid_mask]
+
+        range_val = merged_hist_kw.get("range", None)
+        heights, bin_edges = np.histogram(
+            arr,
+            bins=bins,
+            range=range_val,
+            density=density,
+            weights=weights,
+        )
+        centres = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        ax.scatter(
+            centres,
+            heights,
+            color=resolved_color,
+            marker=actual_marker,
+            s=resolved_markersize,
+            edgecolors=edgecolors,
+            alpha=resolved_alpha,
+            label=resolved_label,
+            zorder=zorder,
+            **scatter_kw,
+        )
+    else:
+        histtype = merged_hist_kw.pop("histtype", "step")
+        if len(arr) == 0:
+            ax.hist(
+                [],
+                bins=bins,
+                color=resolved_color,
+                alpha=resolved_alpha,
+                label=resolved_label,
+                histtype=histtype,
+                **merged_hist_kw,
+            )
+            return ax
+
+        ax.hist(
+            arr,
+            bins=bins,
+            density=density,
+            color=resolved_color,
+            alpha=resolved_alpha,
+            label=resolved_label,
+            histtype=histtype,
+            **merged_hist_kw,
+        )
+
+    return ax

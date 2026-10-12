@@ -9,6 +9,7 @@ from neuralnet.plotting import (
     plot_joint_hist2d_with_marginals,
     plot_error_distributions_by_bits,
     quadrant_plot,
+    hist_plot,
 )
 
 
@@ -529,6 +530,7 @@ class TestQuadrantPlot:
         plt.close(fig)
 
     def test_maintains_colors_and_markers_on_bottom_ax(self):
+        """bottom_ax scatter must preserve custom colors and markers configured for quadrants."""
         """bottom_ax scatter must preserve custom colors, markers, and markersize configured for quadrants."""
         df = pl.DataFrame(
             {
@@ -538,6 +540,8 @@ class TestQuadrantPlot:
             }
         )
         custom_config = {
+            "a_only": {"color": "magenta", "marker": "D"},
+            "b_only": {"color": "cyan", "marker": "P"},
             "a_only": {"color": "magenta", "marker": "D", "markersize": 45.0},
             "b_only": {"color": "cyan", "marker": "P", "markersize": 60.0},
         }
@@ -564,6 +568,143 @@ class TestQuadrantPlot:
         )
         top_ax.set_xlim(-2.5, 2.5)
         np.testing.assert_allclose(bottom_ax.get_xlim(), (-2.5, 2.5))
+        plt.close(fig)
+
+
+class TestHistPlot:
+    @pytest.fixture
+    def sample_df(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "score": [1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 5.0, 6.0, 7.0],
+                "weight": [1.0] * 10,
+            }
+        )
+
+    def test_default_plots_step_histogram(self, sample_df):
+        from matplotlib.collections import PathCollection
+
+        fig, ax = plt.subplots()
+        ret_ax = hist_plot(sample_df, ax=ax, col="score")
+        assert ret_ax is ax
+        scatter_artists = [c for c in ax.collections if isinstance(c, PathCollection)]
+        assert len(scatter_artists) == 0
+        assert len(ax.patches) > 0 or len(ax.lines) > 0
+        plt.close(fig)
+
+    def test_marker_plots_markers_at_bin_centres(self, sample_df):
+        from matplotlib.collections import PathCollection
+
+        fig, ax = plt.subplots()
+        edges = np.array([0.0, 2.0, 4.0, 6.0, 8.0])
+        ret_ax = hist_plot(sample_df, ax=ax, col="score", bins=edges, marker="o", density=False)
+        assert ret_ax is ax
+        scatter_artists = [c for c in ax.collections if isinstance(c, PathCollection)]
+        assert len(scatter_artists) == 1
+        assert len(ax.patches) == 0
+        assert len(ax.lines) == 0
+
+        # Check that x positions are the middle of each bin
+        expected_centres = (edges[:-1] + edges[1:]) / 2.0
+        offsets = scatter_artists[0].get_offsets()
+        np.testing.assert_allclose(offsets[:, 0], expected_centres)
+
+        # Check counts
+        expected_counts, _ = np.histogram(sample_df["score"].to_numpy(), bins=edges)
+        np.testing.assert_allclose(offsets[:, 1], expected_counts)
+        plt.close(fig)
+
+    def test_quadrant_hist_config_fields(self, sample_df):
+        from matplotlib.collections import PathCollection
+
+        fig, ax = plt.subplots()
+        config = {
+            "color": "magenta",
+            "marker": "D",
+            "markersize": 75.0,
+            "alpha": 0.45,
+            "label": "MyQuadrant",
+            "hist_kwargs": {"linewidth": 2.5},
+        }
+        hist_plot(sample_df, ax=ax, col="score", config=config)
+        scatter_artists = [c for c in ax.collections if isinstance(c, PathCollection)]
+        assert len(scatter_artists) == 1
+        sc = scatter_artists[0]
+        np.testing.assert_array_equal(sc.get_sizes(), [75.0])
+        assert sc.get_alpha() == 0.45
+        assert sc.get_label() == "MyQuadrant"
+        plt.close(fig)
+
+    def test_polars_lazyframe_and_dataframe(self, sample_df):
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        # DataFrame with single column inferred
+        single_df = sample_df.select("score")
+        hist_plot(single_df, ax=ax1)
+        assert len(ax1.patches) > 0 or len(ax1.lines) > 0
+
+        # LazyFrame with single column inferred
+        single_lf = sample_df.select("score").lazy()
+        hist_plot(single_lf, ax=ax2, marker="s")
+        assert len(ax2.collections) == 1
+        plt.close(fig)
+
+    def test_multicolumn_without_col_raises(self, sample_df):
+        fig, ax = plt.subplots()
+        with pytest.raises(ValueError, match="col.*must be specified"):
+            hist_plot(sample_df, ax=ax)
+
+        with pytest.raises(ValueError, match="col.*must be specified"):
+            hist_plot(sample_df.lazy(), ax=ax)
+        plt.close(fig)
+
+    def test_empty_dataframe_and_lazyframe(self):
+        empty_df = pl.DataFrame({"score": pl.Series(dtype=pl.Float64)})
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        hist_plot(empty_df, ax=ax1)
+        hist_plot(empty_df.lazy(), ax=ax2, marker="o")
+        plt.close(fig)
+
+    def test_positional_arguments_ordering(self, sample_df):
+        fig, ax = plt.subplots()
+        # (df, ax) with single-column
+        ret1 = hist_plot(sample_df.select("score"), ax)
+        assert ret1 is ax
+
+        # (df, ax, col)
+        ret2 = hist_plot(sample_df, ax, "score")
+        assert ret2 is ax
+
+        # (df, col, ax)
+        ret3 = hist_plot(sample_df, "score", ax)
+        assert ret3 is ax
+        plt.close(fig)
+
+    def test_gca_when_ax_is_none(self, sample_df):
+        plt.close("all")
+        fig, ax = plt.subplots()
+        ret_ax = hist_plot(sample_df.select("score"))
+        assert ret_ax is ax
+        plt.close("all")
+
+    def test_col_keyword_and_no_column_alias(self, sample_df):
+        import inspect
+
+        sig = inspect.signature(hist_plot)
+        assert "col" in sig.parameters
+        assert "column" not in sig.parameters
+
+        fig, ax = plt.subplots()
+        # col works as keyword argument
+        ret_ax = hist_plot(sample_df, ax=ax, col="score")
+        assert ret_ax is ax
+
+        # column is not an accepted parameter: on multi-column df, col remains None
+        with pytest.raises(ValueError, match="col.*must be specified"):
+            hist_plot(sample_df, ax=ax, column="score")
+
+        # on single-column df, unknown keyword 'column' fails in matplotlib
+        with pytest.raises((TypeError, AttributeError)):
+            hist_plot(sample_df.select("score"), ax=ax, column="score")
         plt.close(fig)
 
 
