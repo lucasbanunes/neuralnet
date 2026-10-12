@@ -42,48 +42,48 @@ partition "Tuning Process" {
     note left
         **Input:**
         - Models
-            - No quantization
+            - FP
             - PTQ
             - QAT
         - Dataset
     end note
     note right
         **Output:**
-        - Metrics: ROC AUC, SP, Pd, Fr
+        - Metrics:  SP, Pd, Fr
     end note
 }
-partition "FPGA Implementation" {
-    fork
-        :Implementation with hls4ml;
-        note left
-            **Input:**
-            - Model files
-            - HLS4ML config
-        end note
-        note right
-            **Output:**
-            - Implementation Code
-        end note
-    fork again
-        :Implementation with System Verilog;
-        note right
-            **Output:**
-            - Implementation Code
-        end note
-    endfork
-    :Compare FPGA models;
-    note left
-        **Input:**
-        - Implementation files
-    end note
-    note right
-        **Output:**
-        - Latency
-        - Resource usage
-        - Power Consumption
-        - Performance metrics
-    end note
-}
+' partition "FPGA Implementation" {
+'     fork
+'         :Implementation with hls4ml;
+'         note left
+'             **Input:**
+'             - Model files
+'             - HLS4ML config
+'         end note
+'         note right
+'             **Output:**
+'             - Implementation Code
+'         end note
+'     fork again
+'         :Implementation with System Verilog;
+'         note right
+'             **Output:**
+'             - Implementation Code
+'         end note
+'     endfork
+'     :Compare FPGA models;
+'     note left
+'         **Input:**
+'         - Implementation files
+'     end note
+'     note right
+'         **Output:**
+'         - Latency
+'         - Resource usage
+'         - Power Consumption
+'         - Performance metrics
+'     end note
+' }
 
 stop
 @enduml

@@ -1,4 +1,5 @@
 from typing import Any, Literal, TypedDict, overload, Annotated
+from math import isinf
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer
 import polars as pl
 import numpy as np
@@ -47,19 +48,24 @@ type BinHighType = Annotated[
 
 type BinClosedType = Annotated[
     Literal["left", "right", "both", "none"],
-    Field(
-        description="Indicates whether the bin is closed on the left, right, both, or neither side."
-    ),
+    Field(description="Indicates whether the bin is closed on the left, right, both, or neither side."),
 ]
+
+BinClosedPolarsEnum = pl.Enum(["left", "right", "both", "none"])
+
+
+def float_to_latex(val: float) -> str:
+    if isinf(val):
+        return "\\infty" if val > 0 else "-\\infty"
+    return str(val)
 
 
 class VariableBin(BaseModel):
-    var_name: Annotated[
-        str, Field(description="Name of the variable used in the binning.")
-    ]
+    var_name: Annotated[str, Field(description="Name of the variable used in the binning.")]
     low: BinLowType
     high: BinHighType
     closed: BinClosedType
+    label: Annotated[str | None, Field(description="Label for the bin, used for display purposes.")] = None
 
     def as_polars_expr(self) -> "pl.Expr":
         return pl.col(self.var_name).is_between(self.low, self.high, closed=self.closed)
@@ -70,10 +76,28 @@ class VariableBin(BaseModel):
     @overload
     def apply_bin(self, df: "pl.LazyFrame") -> "pl.LazyFrame": ...
 
-    def is_inside_polars(
-        self, df: "pl.DataFrame | pl.LazyFrame"
-    ) -> "pl.DataFrame | pl.LazyFrame":
+    def is_inside_polars(self, df: "pl.DataFrame | pl.LazyFrame") -> "pl.DataFrame | pl.LazyFrame":
         return df.filter(self.as_polars_expr())
+
+    def as_latex(self):
+        if self.label is None:
+            label = self.var_name
+        else:
+            label = self.label
+
+        low_label = float_to_latex(self.low)
+        high_label = float_to_latex(self.high)
+
+        if self.closed == "left":
+            interval = f"[{low_label}, {high_label})"
+        elif self.closed == "right":
+            interval = f"({low_label}, {high_label}]"
+        elif self.closed == "both":
+            interval = f"[{low_label}, {high_label}]"
+        else:  # self.closed == "none"
+            interval = f"({low_label}, {high_label})"
+
+        return f"{label} $ \\in {interval}$ "
 
 
 class Bin(BaseModel):
@@ -83,6 +107,13 @@ class Bin(BaseModel):
 
     def as_polars_expr(self, name: str) -> "pl.Expr":
         return pl.col(name).is_between(self.low, self.high, closed=self.closed)
+
+    def as_polars_struct(self) -> "pl.Expr":
+        return pl.struct(
+            low=pl.lit(self.low, dtype=pl.Float64),
+            high=pl.lit(self.high, dtype=pl.Float64),
+            closed=pl.lit(self.closed, dtype=BinClosedPolarsEnum),
+        )
 
     def sample(self, n_samples: int) -> Numpy1DFloatArray:
         """
@@ -136,11 +167,27 @@ class AbsoluteVariableBin(VariableBin):
     high: AbsoluteBinHighType
 
     def as_polars_expr(self) -> pl.Expr:
-        return (
-            pl.col(self.var_name)
-            .abs()
-            .is_between(self.low, self.high, closed=self.closed)
-        )
+        return pl.col(self.var_name).abs().is_between(self.low, self.high, closed=self.closed)
+
+    def as_latex(self):
+        if self.label is None:
+            label = self.var_name
+        else:
+            label = self.label
+
+        low_label = float_to_latex(self.low)
+        high_label = float_to_latex(self.high)
+
+        if self.closed == "left":
+            interval = f"[{low_label}, {high_label})"
+        elif self.closed == "right":
+            interval = f"({low_label}, {high_label}]"
+        elif self.closed == "both":
+            interval = f"[{low_label}, {high_label}]"
+        else:  # self.closed == "none"
+            interval = f"({low_label}, {high_label})"
+
+        return f"|{label}| $ \\in {interval}$ "
 
 
 class AbsoluteBin(Bin):
