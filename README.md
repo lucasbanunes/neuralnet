@@ -5,7 +5,7 @@
 [![Keras 3](https://img.shields.io/badge/Keras-3-red.svg)](https://keras.io/)
 [![Polars](https://img.shields.io/badge/Polars-1.x-blueviolet.svg)](https://pola.rs/)
 
-**neuralnet** is a high-performance deep learning and quantization framework developed for the **Neural Ringer Algorithm** deployed in the Level 0 (L0) and Level 2 (L2) calorimeter trigger electron identification at the **ATLAS Experiment (CERN)**.
+**neuralnet** is a high-performance deep learning framework developed for the **Neural Ringer Algorithm** deployed for calorimeter trigger electron identification at the **ATLAS Experiment (CERN)**.
 
 ---
 
@@ -33,31 +33,20 @@
 ## Overview & Physics Context
 
 ### The Ringer Algorithm
-In high-energy particle physics, fast electron and photon identification in real-time trigger systems requires discriminative representations of calorimeter energy deposits. The **Ringer algorithm** concentrates shower development into concentric calorimeter rings around the most energetic cluster cell across the 7 longitudinal calorimeter sampling layers of the ATLAS detector:
+In high-energy particle physics, fast electron and photon identification in real-time trigger systems requires discriminative representations of calorimeter energy deposits. The **Ringer algorithm** concentrates shower development into concentric calorimeter rings around the most energetic cluster cell across the 7 longitudinal calorimeter sampling layers of the ATLAS detector.
 
-| Calorimeter Sampling Layer | Number of Rings | Description |
-|:---|:---:|:---|
-| **Pre-Sampler (PS)** | 8 | Initial shower initiation |
-| **Electromagnetic 1 (EM1)** | 64 | Fine strip granularity for $\gamma / \pi^0$ separation |
-| **Electromagnetic 2 (EM2)** | 8 | Core electromagnetic shower containment |
-| **Electromagnetic 3 (EM3)** | 8 | Tail of the EM shower |
-| **Hadronic 1 (Had1)** | 4 | Initial hadronic leakage |
-| **Hadronic 2 (Had2)** | 4 | Mid hadronic leakage |
-| **Hadronic 3 (Had3)** | 4 | Deep hadronic leakage |
-| **Total** | **100** | Full calorimeter shower profile |
-
-Before feeding rings into neural networks, ring energies are normalized (using `AlternativeNorm1`, which normalizes ring deposits while preserving signed energy ratios) and optionally decimated by layer-wise fractions (`ring_fraction`).
+Before feeding rings into neural networks, ring energies are normalized (using `AlternativeNorm1`) and optionally decimated by layer-wise fractions (`ring_fraction`).
 
 ### Specialist Committee Architecture
 Electromagnetic shower shapes vary substantially with transverse energy ($E_T$) and pseudorapidity ($|\eta|$). To achieve optimal classification:
 1. The $(E_T, |\eta|)$ phase space is divided into a 2D grid of specialist bins.
-2. For each bin, a dedicated Multi-Layer Perceptron (MLP) specialist is trained using $k$-fold cross-validation and multiple random weight initializations.
+2. For each bin, a dedicated specialist model is trained using $k$-fold cross-validation and multiple random weight initializations.
 3. The best model per bin is selected based on the **Signal-to-Background Performance index ($SP$)**:
    $$\text{SP} = \sqrt{\sqrt{\text{TPR} \cdot (1 - \text{FPR})} \cdot \frac{\text{TPR} + (1 - \text{FPR})}{2}}$$
 4. The ensemble of selected models forms a **Binned Specialist Committee** (`BinnedSpecialistCommittee`), routing events at inference time to their corresponding specialist based on their $(E_T, |\eta|)$ coordinate.
 
 ### Quantization for Hardware Deployment
-Trigger algorithms at Level 0 operate within stringent FPGA latency and resource constraints (e.g., target latencies $\le 1\,\mu\text{s}$). The framework supports:
+Trigger algorithms at Level 1 operate within stringent FPGA latency and resource constraints (e.g., target latencies $\le 1\,\mu\text{s}$). The framework supports:
 - **Floating-Point (FP)** baseline training.
 - **Post-Training Quantization (PTQ)**: Quantizing weights and normalizer constants to custom fixed-point representations $\langle \text{total\_bits}, \text{integer\_bits} \rangle$.
 - **Quantization-Aware Training (QAT)**: Simulating fixed-point quantization during gradient descent using `hgq2` (Heterogeneous Graphical Quantization) or custom quantization layers.
