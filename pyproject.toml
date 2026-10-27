@@ -7,7 +7,8 @@ requires-python = ">=3.12"
 dependencies = [
     "colorlog==6.10.1",
     "efficient-kan",
-    "hgq2==0.1.6",
+    "hgq2==0.2.0",
+    "jupyterlab>=4.6.4",
     "matplotlib==3.10.8",
     "mplhep==1.1.2",
     "pandas==3.0.0",
@@ -16,6 +17,7 @@ dependencies = [
     "polars==1.39.3",
     "pyarrow==23.0.0",
     "pydantic==2.12.5",
+    "python-dotenv>=1.2.4",
     "pyyaml==6.0.3",
     "scikit-learn==1.8.0",
     "submitit==1.5.4",
@@ -24,15 +26,22 @@ dependencies = [
     "typer==0.23.1",
 ]
 
+[project.scripts]
+neuralnet = "neuralnet.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -vv -p no:warnings"
+addopts = "-ra -vv"
 # log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s | %(levelname)s | %(name)s | %(module)s | %(funcName)s | %(lineno)s | %(message)s"
 log_date_format = "%Y-%m-%d %H:%M:%S"
-pythonpath = "."
 filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]
+pythonpath = "src/"
 
 [tool.pytest_env]
 env_files = [".env"]
