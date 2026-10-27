@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "colorlog==6.10.1",
     "efficient-kan",
-    "hgq2==0.1.6",
+    "hgq2==0.2.0",
     "jupyterlab>=4.6.4",
     "matplotlib==3.10.8",
     "mplhep==1.1.2",
