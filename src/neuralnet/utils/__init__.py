@@ -3,9 +3,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
-def walk_paths(
-    paths: str | Path | Iterable[str | Path], file_ext: str, dev: bool = False
-) -> Iterator[Path]:
+def walk_paths(paths: str | Path | Iterable[str | Path], file_ext: str, dev: bool = False) -> Iterator[Path]:
     """
     Generator that opens all directories in an iterator for
     a specific file extension. This is useful for script cases where
@@ -40,9 +38,7 @@ def walk_paths(
     for ipath in paths:
         if ipath.is_file():
             if ipath.suffix != f".{file_ext}":
-                raise ValueError(
-                    f"File {ipath} does not have the expected extension .{file_ext}"
-                )
+                raise ValueError(f"File {ipath} does not have the expected extension .{file_ext}")
             yield ipath
             i += 1
             if dev and i > 0:
@@ -86,21 +82,39 @@ def traverse(
         for k, v in d.items():
             new_key = f"{parent_key}.{k}" if parent_key else k
             if isinstance(v, traverse_types) and not isinstance(v, (str, bytes)):
-                yield from traverse(v, new_key)
+                yield from traverse(v, new_key, include_sequences=include_sequences)
             else:
                 yield new_key, v
     elif isinstance(d, Iterable) and not isinstance(d, (str, bytes)):
         for i, item in enumerate(d):
             item_key = f"{parent_key}.{i}" if parent_key else str(i)
             if isinstance(item, traverse_types) and not isinstance(item, (str, bytes)):
-                yield from traverse(item, item_key)
+                yield from traverse(item, item_key, include_sequences=include_sequences)
             else:
                 yield item_key, item
     else:
         raise ValueError("Input must be a mapping or an iterable of objects")
 
 
-def unflatten_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
+def _convert_numeric_dicts_to_lists(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        converted = {k: _convert_numeric_dicts_to_lists(v) for k, v in obj.items()}
+        if converted and all(isinstance(k, str) and k.isdigit() for k in converted):
+            indices = sorted(int(k) for k in converted)
+            if indices == list(range(len(indices))):
+                return [converted[str(i)] for i in indices]
+        return converted
+    if isinstance(obj, list):
+        return [_convert_numeric_dicts_to_lists(item) for item in obj]
+    return obj
+
+
+def unflatten_mapping(
+    mapping: Mapping[str, Any],
+    *,
+    parse_sequences: bool = False,
+    parse_none: bool = False,
+) -> dict[str, Any]:
     """
     Unflatten a mapping with dot-separated keys into a nested dictionary.
 
@@ -108,6 +122,11 @@ def unflatten_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     ----------
     mapping : Mapping[str, Any]
         A mapping with dot-separated keys.
+    parse_sequences : bool, default=False
+        If True, nested dictionaries whose keys are consecutive integer strings
+        (``"0"``, ``"1"``, ...) are converted back into lists.
+    parse_none : bool, default=False
+        If True, string values equal to ``"None"`` are converted back to ``None``.
 
     Returns
     -------
@@ -116,6 +135,8 @@ def unflatten_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     for key, value in mapping.items():
+        if parse_none and value == "None":
+            value = None
         parts = key.split(".")
         d = result
         for part in parts[:-1]:
@@ -125,6 +146,8 @@ def unflatten_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
                 d[part] = {}
             d = d[part]
         d[parts[-1]] = value
+    if parse_sequences:
+        return _convert_numeric_dicts_to_lists(result)
     return result
 
 

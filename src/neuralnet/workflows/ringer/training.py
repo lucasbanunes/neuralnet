@@ -17,15 +17,18 @@ if TYPE_CHECKING:
     from keras import Sequential
 
 from itertools import product
-from pydantic import AfterValidator, Field, ConfigDict, BaseModel, PlainSerializer
+from pydantic import AfterValidator, Field, ConfigDict, BaseModel
 import logging
 from pathlib import Path
 import numpy as np
 from functools import cached_property
-import json
-from zipfile import ZipFile, ZIP_DEFLATED
+import tempfile
+import time
+import mlflow
+import mlflow.keras
+from mlflow.entities import Metric
+from mlflow.tracking import MlflowClient
 
-# from ...json import cast_to_json_value
 from ...submitit import ExecutorConfig
 from ...logging import LoggerName
 from ...datasets.ringer import (
@@ -50,7 +53,7 @@ from ...models.dense import (
     MLPFactory,
     FixedPointQuantizedMLP,
 )
-from ...utils import traverse
+from ...utils import traverse, unflatten_mapping
 from ...normalizers.factories import FixedPointAlternativeNormL1
 from ...normalizers.polars import AlternativeNorm1, FixedPointQuantizedAlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
@@ -461,9 +464,39 @@ class RingerKerasTrainingJob(YamlBaseModel):
     # Execution related fields
     dry_run: Annotated[bool, Field(description="Perform a dry run without actually training")] = False
     executor_config: ExecutorConfigType
-    output_path: Annotated[
-        Path, Field(description="Path to save the results of the job"), PlainSerializer(str, return_type=str)
+
+    # MLflow configuration fields
+    experiment_name: Annotated[
+        str,
+        Field(description="Name of the MLflow experiment to log the training runs under."),
     ]
+    tracking_uri: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "MLflow tracking server URI. If None, uses the MLFLOW_TRACKING_URI "
+                "environment variable or default local MLflow store."
+            ),
+        ),
+    ] = None
+    run_name: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional name for the main (parent) MLflow run.",
+        ),
+    ] = None
+    run_id: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "MLflow run ID of the main training run. Automatically populated "
+                "when the job is submitted or loaded from MLflow."
+            ),
+        ),
+    ] = None
 
     # Misc
     logger_name: LoggerName = None
@@ -478,30 +511,10 @@ class RingerKerasTrainingJob(YamlBaseModel):
         description="Criterion to select the best fold. Must be a key in the fit dictionary of the training results.",
     )
 
-    # # Private
-    # _thresholds: list[float] | None = PrivateAttr(None)
-
-    # @property
-    # def thresholds(self) -> list[float]:
-    #     if self._thresholds is None:
-    #         raise ValueError("Thresholds not initialized")
-    #     return self._thresholds
-
-    # @cached_property
-    # def thresholds_array(self) -> npt.NDArray[np.floating]:
-    #     return np.array(self.thresholds)
-
-    @cached_property
-    def config_path(self) -> Path:
-        return self.output_path / "config.json"
-
-    @cached_property
-    def all_models_results_path(self) -> Path:
-        return self.output_path / "all_models_results.parquet"
-
-    @cached_property
-    def selected_models_path(self) -> Path:
-        return self.output_path / "selected_models.parquet"
+    def _configure_mlflow(self) -> MlflowClient:
+        if self.tracking_uri is not None:
+            mlflow.set_tracking_uri(self.tracking_uri)
+        return MlflowClient(tracking_uri=self.tracking_uri)
 
     @cached_property
     def preprocessing_pipeline(self) -> PreprocessingPipeline:
@@ -513,34 +526,31 @@ class RingerKerasTrainingJob(YamlBaseModel):
 
     @cached_property
     def all_model_results(self) -> pl.DataFrame:
-        results_path = self.output_path / "all_models_results.parquet"
-        if not results_path.exists():
-            raise FileNotFoundError(f"All models results file not found at {results_path}")
-        return pl.read_parquet(results_path)
+        if self.run_id is None:
+            raise ValueError("Cannot load all_model_results because run_id is not set.")
+        self._configure_mlflow()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_path = mlflow.artifacts.download_artifacts(
+                run_id=self.run_id,
+                artifact_path="all_models_results.parquet",
+                dst_path=tmp_dir,
+                tracking_uri=self.tracking_uri,
+            )
+            return pl.read_parquet(local_path)
 
     @cached_property
     def selected_models(self) -> pl.DataFrame:
-        selected_models_path = self.output_path / "selected_models.parquet"
-        if not selected_models_path.exists():
-            raise FileNotFoundError(f"Selected models file not found at {selected_models_path}")
-        return pl.read_parquet(selected_models_path)
-
-    @cached_property
-    def models_output_dir(self) -> Path:
-        return self.output_path / "models"
-
-    def get_member_output_dir(self, member_id: int) -> Path:
-        return self.models_output_dir / f"member_{member_id}"
-
-    def get_member_model_path(self, member: Path | int) -> Path:
-        if isinstance(member, int):
-            member = self.get_member_output_dir(member)
-        return member / "model.keras"
-
-    def get_member_results_path(self, member: Path | int) -> Path:
-        if isinstance(member, int):
-            member = self.get_member_output_dir(member)
-        return member / "results.json.zip"
+        if self.run_id is None:
+            raise ValueError("Cannot load selected_models because run_id is not set.")
+        self._configure_mlflow()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_path = mlflow.artifacts.download_artifacts(
+                run_id=self.run_id,
+                artifact_path="selected_models.parquet",
+                dst_path=tmp_dir,
+                tracking_uri=self.tracking_uri,
+            )
+            return pl.read_parquet(local_path)
 
     def get_dataset(
         self, fold: int, et_bin: BinDict | None = None, eta_bin: BinDict | None = None, **kwargs
@@ -728,13 +738,22 @@ class RingerKerasTrainingJob(YamlBaseModel):
         return BinnedSpecialistCommittee(models=binned_models)
 
     def submit(self):
-
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}")
-        self.output_path.mkdir(parents=True, exist_ok=True)
-        config_dict = self.model_dump()
-        config_dict.pop("output_path")
-        self.output_path.joinpath("config.json").write_text(json.dumps(config_dict, indent=4), encoding="utf-8")
+
+        client = self._configure_mlflow()
+        experiment = mlflow.set_experiment(self.experiment_name)
+
+        with mlflow.start_run(
+            run_id=self.run_id,
+            experiment_id=experiment.experiment_id if self.run_id is None else None,
+            run_name=self.run_name if self.run_id is None else None,
+        ) as parent_run:
+            parent_run_id = parent_run.info.run_id
+            object.__setattr__(self, "run_id", parent_run_id)
+            config_dict = self.model_dump(exclude={"run_id"})
+            flat_params = {k: str(v) for k, v in traverse(config_dict, include_sequences=True)}
+            mlflow.log_params(flat_params)
 
         dataset = RingerParquetDataset(
             dataset_dir=self.dataset_dir,
@@ -749,6 +768,12 @@ class RingerKerasTrainingJob(YamlBaseModel):
         n_folds = dataset.get_n_folds()
         logger.info(f"The dataset has {n_folds} folds.")
 
+        existing_runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string=f"tags.mlflow.parentRunId = '{parent_run_id}' and attributes.status = 'FINISHED'",
+        )
+        completed_member_ids = {int(r.data.params["id"]) for r in existing_runs if "id" in r.data.params}
+
         folds_range = range(n_folds)
         inits_range = range(self.inits)
         iterator = product(self.et_bins, self.eta_bins, folds_range, inits_range)
@@ -756,29 +781,28 @@ class RingerKerasTrainingJob(YamlBaseModel):
         submitted_jobs = []
         with executor.batch():
             for member_id, (et_bin, eta_bin, fold, init) in enumerate(iterator):
-                member_output_path = self.get_member_output_dir(member_id)
-                try:
-                    RingerKerasTrainingJob.validate_saved_member_directory(member_output_path)
+                if member_id in completed_member_ids:
                     logger.info(
-                        f"{member_id}: Member directory {member_output_path} already exists and is valid. Skipping training."
+                        f"{member_id}: Nested MLflow run for member {member_id} already finished. Skipping training."
                     )
                     continue
-                except (FileNotFoundError, NotADirectoryError):
-                    logger.info(
-                        f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
-                    )
-                    submitted_job = executor.submit(
-                        self._run_training,
-                        member_id,
-                        et_bin.model_dump(),
-                        eta_bin.model_dump(),
-                        fold,
-                        init,
-                    )
-                    submitted_jobs.append(submitted_job)
+                logger.info(
+                    f"{member_id}: Submitting training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
+                )
+                submitted_job = executor.submit(
+                    self._run_training,
+                    member_id,
+                    et_bin.model_dump(),
+                    eta_bin.model_dump(),
+                    fold,
+                    init,
+                    parent_run_id,
+                    experiment.experiment_id,
+                )
+                submitted_jobs.append(submitted_job)
 
         dependent_executor = self.executor_config.get_executor()
-        from submitit import AutoExecutor
+        from submitit import AutoExecutor, LocalExecutor
 
         if isinstance(dependent_executor, AutoExecutor) and submitted_jobs:
             dependency_string = ":".join(str(job.job_id) for job in submitted_jobs)
@@ -786,11 +810,27 @@ class RingerKerasTrainingJob(YamlBaseModel):
             dependent_executor.update_parameters(
                 slurm_additional_parameters={"dependency": f"afterok:{dependency_string}"}
             )
-        dependent_executor.submit(self.post_training)
+            dependent_executor.submit(self.post_training, parent_run_id, experiment.experiment_id)
+        elif isinstance(dependent_executor, LocalExecutor):
+            for job in submitted_jobs:
+                job.result()
+            post_job = dependent_executor.submit(self.post_training, parent_run_id, experiment.experiment_id)
+            post_job.result()
+        else:
+            dependent_executor.submit(self.post_training, parent_run_id, experiment.experiment_id)
 
         logger.info("All jobs submitted.")
 
-    def _run_training(self, member_id: int, et_bin: dict, eta_bin: dict, fold: int, init: int):
+    def _run_training(
+        self,
+        member_id: int,
+        et_bin: dict,
+        eta_bin: dict,
+        fold: int,
+        init: int,
+        parent_run_id: str | None = None,
+        experiment_id: str | None = None,
+    ):
         from neuralnet.models.keras.routines import fit_routine
         from keras import Model
 
@@ -798,6 +838,13 @@ class RingerKerasTrainingJob(YamlBaseModel):
         logger.info(
             f"{member_id}: Running training for Et bin {et_bin} and Eta bin {eta_bin}, fold {fold} and init {init}"
         )
+
+        client = self._configure_mlflow()
+        resolved_parent_run_id = parent_run_id or self.run_id
+        if experiment_id is None:
+            experiment = mlflow.set_experiment(self.experiment_name)
+            experiment_id = experiment.experiment_id
+
         dataset = self.get_dataset(
             fold=fold,
             et_bin=et_bin,
@@ -810,8 +857,6 @@ class RingerKerasTrainingJob(YamlBaseModel):
             "et_bin": et_bin,
             "eta_bin": eta_bin,
         }
-        output_dir = self.get_member_output_dir(member_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
         model_factory = self.model_factory.model_copy(update={"name": f"{self.model_factory.name}_{member_id}"})
         model: Model = model_factory.as_keras()
         if self.balance_class_weights:
@@ -838,141 +883,156 @@ class RingerKerasTrainingJob(YamlBaseModel):
             from_logits=self.from_logits,
         )
         callbacks = [sp_callback]
-        model, results["history"] = fit_routine(
-            model=model,
-            train_data=train_data,
-            val_data=val_data,
-            loss=self.loss.as_keras(),
-            optimizer=self.optimizer.as_keras(),
-            metrics=["accuracy"],
-            callbacks=callbacks,
-            epochs=epochs,
-            verbose=self.verbose,
-            batch_size=self.batch_size,
-            class_weight=class_weights,
-        )
-        logger.info(f"Finished training for fold {fold} and init {init}")
 
-        model_path = self.get_member_model_path(output_dir)
-        model.save(str(model_path))
+        with mlflow.start_run(
+            experiment_id=experiment_id,
+            run_name=f"member_{member_id}",
+            nested=True,
+            parent_run_id=resolved_parent_run_id,
+        ) as child_run:
+            member_params = {
+                "id": member_id,
+                "fold": fold,
+                "init": init,
+                "et_bin": et_bin,
+                "eta_bin": eta_bin,
+            }
+            flat_member_params = {k: str(v) for k, v in traverse(member_params, include_sequences=True)}
+            mlflow.log_params(flat_member_params)
 
-        # Best epoch starts at 1
-        best_epoch = results["history"]["val"]["max_sp_best_epoch"][-1]
-        results["fit"] = {
-            "train": {
-                metric_name: metric_history[best_epoch]
-                for metric_name, metric_history in results["history"]["train"].items()
-            },
-            "val": {
-                metric_name: metric_history[best_epoch]
-                for metric_name, metric_history in results["history"]["val"].items()
-            },
-        }
+            model, results["history"] = fit_routine(
+                model=model,
+                train_data=train_data,
+                val_data=val_data,
+                loss=self.loss.as_keras(),
+                optimizer=self.optimizer.as_keras(),
+                metrics=["accuracy"],
+                callbacks=callbacks,
+                epochs=epochs,
+                verbose=self.verbose,
+                batch_size=self.batch_size,
+                class_weight=class_weights,
+            )
+            logger.info(f"Finished training for fold {fold} and init {init}")
 
-        # results["train"] = self.run_evaluation(
-        #     model=model,
-        #     data=train_numpy,
-        #     class_weight=dataset.train_class_weights()
-        #     if self.balance_class_weights
-        #     else None,
-        # )
-        # del train_numpy
+            start_dt = results["history"]["start"]
+            end_dt = results["history"]["end"]
+            training_time = (end_dt - start_dt).total_seconds()
+            mlflow.set_tags(
+                {
+                    "history.start": start_dt.isoformat(),
+                    "history.end": end_dt.isoformat(),
+                }
+            )
 
-        # results["val"] = self.run_evaluation(
-        #     model=model,
-        #     data=val_numpy,
-        #     class_weight=dataset.val_class_weights()
-        #     if self.balance_class_weights
-        #     else None,
-        # )
-        # del val_numpy
+            best_epoch = results["history"]["val"]["max_sp_best_epoch"][-1]
+            results["fit"] = {
+                "train": {
+                    metric_name: metric_history[best_epoch]
+                    for metric_name, metric_history in results["history"]["train"].items()
+                },
+                "val": {
+                    metric_name: metric_history[best_epoch]
+                    for metric_name, metric_history in results["history"]["val"].items()
+                },
+            }
 
-        # if not self.dry_run and hasattr(dataset, "test_df"):
-        #     test_numpy = self.get_numpy_data(dataset.test_df())
-        #     results["test"] = self.run_evaluation(
-        #         model=model,
-        #         data=test_numpy,
-        #         class_weight=dataset.test_class_weights()
-        #         if self.balance_class_weights
-        #         else None,
-        #     )
-        #     del test_numpy
+            logger.info(f"Finished evaluating for fold {fold} and init {init}")
 
-        logger.info(f"Finished evaluating for fold {fold} and init {init}")
-        zip_path = self.get_member_results_path(output_dir)
-        results_path = Path(str(zip_path).replace(".zip", ""))
-        from ...json import cast_to_json_value
+            ts = int(time.time() * 1000)
+            metric_entities: list[Metric] = []
+            for split in ("train", "val"):
+                for metric_name, metric_history in results["history"][split].items():
+                    key = f"history.{split}.{metric_name}"
+                    for step, val in enumerate(metric_history):
+                        metric_entities.append(Metric(key=key, value=float(val), timestamp=ts, step=step))
 
-        with results_path.open("w", encoding="utf-8") as f:
-            json.dump(cast_to_json_value(results), f, indent=4)
+            for key, val in traverse({"fit": results["fit"]}, include_sequences=False):
+                metric_entities.append(Metric(key=key, value=float(val), timestamp=ts, step=int(best_epoch)))
 
-        with ZipFile(zip_path, "w", ZIP_DEFLATED) as zipf:
-            zipf.write(results_path, arcname="results.json")
+            metric_entities.append(Metric(key="training_time", value=float(training_time), timestamp=ts, step=0))
 
-        logger.info(f"Saved results to {output_dir}")
+            for idx in range(0, len(metric_entities), 1000):
+                client.log_batch(child_run.info.run_id, metrics=metric_entities[idx : idx + 1000])
+
+            mlflow.keras.log_model(model, name="model", pip_requirements=[])
+            logger.info(f"Logged model and metrics to MLflow child run {child_run.info.run_id}")
 
         del model
-        results_path.unlink()
         from keras.backend import clear_session
 
         clear_session()
 
-    # def run_evaluation(
-    #     self,
-    #     model: "Model",
-    #     data: tuple[np.ndarray, np.ndarray],
-    #     class_weight: dict[int, float] | None = None,
-    # ) -> EvaluationDict:
-
-    #     predictions = model.predict(
-    #         data[0], batch_size=self.batch_size, verbose=self.verbose
-    #     )
-    #     if self.from_logits:
-    #         predictions = sigmoid(predictions)
-    #     eval_dict = enhanced_confusion_matrix_from_preds(data[1], predictions)
-    #     if class_weight:
-    #         weighted_eval_dict = {
-    #             "tn": np.array(eval_dict["tn"]) * class_weight[0],
-    #             "tp": np.array(eval_dict["tp"]) * class_weight[1],
-    #             "fn": np.array(eval_dict["fn"]) * class_weight[1],
-    #             "fp": np.array(eval_dict["fp"]) * class_weight[0],
-    #         }
-    #         weighted_enhanced_cm_dict = enhanced_confusion_matrix(
-    #             tn=weighted_eval_dict["tn"],
-    #             tp=weighted_eval_dict["tp"],
-    #             fn=weighted_eval_dict["fn"],
-    #             fp=weighted_eval_dict["fp"],
-    #             thresholds=np.array(eval_dict["thresholds"]),
-    #         )
-    #         eval_dict["weighted"] = weighted_enhanced_cm_dict
-    #     return eval_dict
-
-    def post_training(self):
+    def post_training(self, parent_run_id: str | None = None, experiment_id: str | None = None):
         logger = logging.getLogger(self.logger_name)
-        all_models_results = defaultdict(list)
-        for member_path in self.models_output_dir.glob("member_*"):
-            member_id = int(member_path.name.split("_")[-1])
-            all_models_results["id"].append(member_id)
-            results_path = self.get_member_results_path(member_path)
-            with ZipFile(results_path, "r") as zipf:
-                with zipf.open("results.json") as f:
-                    member_results = json.load(f)
+        client = self._configure_mlflow()
 
-            for key, value in traverse(member_results, include_sequences=False):
-                if value == "Infinity":
-                    value = float("inf")
-                elif value == "-Infinity":
-                    value = float("-inf")
-                all_models_results[key].append(value)
+        resolved_parent_run_id = parent_run_id or self.run_id
+        if resolved_parent_run_id is None:
+            raise ValueError("parent_run_id must be provided or set on self.run_id before running post_training.")
+
+        if experiment_id is None:
+            parent_run_info = client.get_run(resolved_parent_run_id)
+            experiment_id = parent_run_info.info.experiment_id
+
+        child_runs = client.search_runs(
+            experiment_ids=[experiment_id],
+            filter_string=f"tags.mlflow.parentRunId = '{resolved_parent_run_id}'",
+        )
+
+        all_models_results = defaultdict(list)
+        for child_run in child_runs:
+            params = child_run.data.params
+            metrics = child_run.data.metrics
+            tags = child_run.data.tags
+            c_run_id = child_run.info.run_id
+
+            member_id = int(params["id"])
+            all_models_results["id"].append(member_id)
+            all_models_results["run_id"].append(c_run_id)
+            all_models_results["fold"].append(int(params["fold"]))
+            all_models_results["init"].append(int(params["init"]))
+            all_models_results["et_bin.low"].append(float(params["et_bin.low"]))
+            all_models_results["et_bin.high"].append(float(params["et_bin.high"]))
+            all_models_results["et_bin.closed"].append(params["et_bin.closed"])
+            all_models_results["eta_bin.low"].append(float(params["eta_bin.low"]))
+            all_models_results["eta_bin.high"].append(float(params["eta_bin.high"]))
+            all_models_results["eta_bin.closed"].append(params["eta_bin.closed"])
+            all_models_results["history.start"].append(tags.get("history.start"))
+            all_models_results["history.end"].append(tags.get("history.end"))
+            all_models_results["training_time"].append(float(metrics["training_time"]))
+
+            for metric_name in FitTrainMetrics.__annotations__:
+                fit_key = f"fit.train.{metric_name}"
+                all_models_results[fit_key].append(float(metrics[fit_key]))
+
+                hist_key = f"history.train.{metric_name}"
+                hist_items = sorted(client.get_metric_history(c_run_id, hist_key), key=lambda m: m.step)
+                all_models_results[hist_key].append([float(m.value) for m in hist_items])
+
+            for metric_name in FitValMetrics.__annotations__:
+                fit_key = f"fit.val.{metric_name}"
+                is_int_metric = metric_name == "max_sp_best_epoch"
+                val = int(metrics[fit_key]) if is_int_metric else float(metrics[fit_key])
+                all_models_results[fit_key].append(val)
+
+                hist_key = f"history.val.{metric_name}"
+                hist_items = sorted(client.get_metric_history(c_run_id, hist_key), key=lambda m: m.step)
+                all_models_results[hist_key].append(
+                    [int(m.value) if is_int_metric else float(m.value) for m in hist_items]
+                )
 
         logger.info(
             f"Computing best models based on the selection criteria: init: {self.best_init}, fold: {self.best_fold}"
         )
-        all_model_results_df = pl.DataFrame(all_models_results).with_columns(
-            pl.col("history.start").str.to_datetime(),
-            pl.col("history.end").str.to_datetime(),
+        all_model_results_df = (
+            pl.DataFrame(all_models_results)
+            .with_columns(
+                pl.col("history.start").str.to_datetime(),
+                pl.col("history.end").str.to_datetime(),
+            )
+            .sort("id")
         )
-        all_model_results_df.write_parquet(self.all_models_results_path)
 
         bins_cols = [
             "et_bin.low",
@@ -983,51 +1043,52 @@ class RingerKerasTrainingJob(YamlBaseModel):
             "eta_bin.closed",
         ]
         best_init_results = all_model_results_df.group_by(*bins_cols, "fold").agg(self.best_init.select_best_expr())
-        selected_models = best_init_results.group_by(*bins_cols).agg(self.best_fold.select_best_expr())
-        selected_models.write_parquet(self.selected_models_path)
+        selected_models = best_init_results.group_by(*bins_cols).agg(self.best_fold.select_best_expr()).sort("id")
 
-    @staticmethod
-    def validate_saved_directory(output_path: Path | str):
-        output_path = Path(output_path)
-        if not output_path.exists():
-            raise FileNotFoundError(f"Path {output_path} does not exist.")
-        if not output_path.is_dir():
-            raise NotADirectoryError(f"Path {output_path} is not a directory.")
-        if not (output_path / "config.json").exists():
-            raise FileNotFoundError(f"Config file not found in {output_path}.")
-        if not (output_path / "all_models_results.parquet").exists():
-            raise FileNotFoundError(f"All models results file not found in {output_path}.")
-        if not (output_path / "selected_models.parquet").exists():
-            raise FileNotFoundError(f"Selected models file not found in {output_path}.")
+        with mlflow.start_run(run_id=resolved_parent_run_id):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_dir_path = Path(tmp_dir)
+                all_results_file = tmp_dir_path / "all_models_results.parquet"
+                selected_models_file = tmp_dir_path / "selected_models.parquet"
+                all_model_results_df.write_parquet(all_results_file)
+                selected_models.write_parquet(selected_models_file)
+                mlflow.log_artifact(str(all_results_file))
+                mlflow.log_artifact(str(selected_models_file))
 
-        for member_output_path in output_path.glob("member_*"):
-            RingerKerasTrainingJob.validate_saved_member_directory(member_output_path)
+            parent_metrics: dict[str, float] = {}
+            for row in selected_models.iter_rows(named=True):
+                member_id = int(row["id"])
+                child_run_id = row["run_id"]
+                parent_metrics[f"selected.member_{member_id}.training_time"] = float(row["training_time"])
+                for metric_name in FitTrainMetrics.__annotations__:
+                    parent_metrics[f"selected.member_{member_id}.fit.train.{metric_name}"] = float(
+                        row[f"fit.train.{metric_name}"]
+                    )
+                for metric_name in FitValMetrics.__annotations__:
+                    parent_metrics[f"selected.member_{member_id}.fit.val.{metric_name}"] = float(
+                        row[f"fit.val.{metric_name}"]
+                    )
 
-    @staticmethod
-    def validate_saved_member_directory(member_output_path: Path | str):
-        member_output_path = Path(member_output_path)
-        if not member_output_path.exists():
-            raise FileNotFoundError(f"Member directory {member_output_path} does not exist.")
-        if not member_output_path.is_dir():
-            raise NotADirectoryError(f"Member directory {member_output_path} is not a directory.")
+                keras_model = mlflow.keras.load_model(
+                    f"runs:/{child_run_id}/model",
+                    custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense},
+                )
+                mlflow.keras.log_model(keras_model, name=f"model_member_{member_id}", pip_requirements=[])
 
-        model_path = member_output_path / "model.keras"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found in {member_output_path}.")
-        results_path = member_output_path / "results.json.zip"
-        if not results_path.exists():
-            raise FileNotFoundError(f"Results file not found in {member_output_path}.")
+            if parent_metrics:
+                mlflow.log_metrics(parent_metrics)
 
     @classmethod
-    def load(cls, path: Path | str) -> Self:
-        cls.validate_saved_directory(path)
-        path = Path(path)
-        config_path = path / "config.json"
-        with config_path.open("r", encoding="utf-8") as f:
-            config = json.load(f)
-        config["output_path"] = path
-        instance = cls(**config)
-        return instance
+    def load(cls, run_id: str, tracking_uri: str | None = None) -> Self:
+        if tracking_uri is not None:
+            mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+        run = client.get_run(run_id)
+        config = unflatten_mapping(run.data.params, parse_sequences=True, parse_none=True)
+        config["run_id"] = run_id
+        if tracking_uri is not None:
+            config["tracking_uri"] = tracking_uri
+        return cls(**config)
 
     @overload
     def get_member_model(self, member_id: int, with_results: Literal[False] = False) -> "Sequential": ...
@@ -1036,26 +1097,23 @@ class RingerKerasTrainingJob(YamlBaseModel):
     def get_member_model(self, member_id: int, with_results: Literal[True]) -> tuple["Sequential", TrainingResult]: ...
 
     def get_member_model(self, member_id: int, with_results: bool = False):
-        member_output_dir = self.get_member_output_dir(member_id)
+        self._configure_mlflow()
+        member_rows = self.all_model_results.filter(pl.col("id") == member_id)
+        if member_rows.height == 0:
+            raise ValueError(f"No model entry found for member_id={member_id}.")
+        row = member_rows.row(0, named=True)
+        child_run_id = row["run_id"]
 
-        from keras.models import load_model
-        from keras import Model
-
-        model_path = member_output_dir / "model.keras"
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model file not found at {model_path}")
-        model: Model = load_model(
-            model_path, custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense}
+        model = mlflow.keras.load_model(
+            f"runs:/{child_run_id}/model",
+            custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense},
         )
 
         if not with_results:
             return model
 
-        results_path = member_output_dir / "results.json.zip"
-        if not results_path.exists():
-            raise FileNotFoundError(f"Results file not found at {results_path}")
-        with ZipFile(results_path, "r") as zipf:
-            with zipf.open("results.json") as f:
-                results = json.load(f)
-
+        serialized_row = {
+            k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items() if k not in ("id", "run_id")
+        }
+        results = unflatten_mapping(serialized_row)
         return model, results

@@ -14,6 +14,8 @@ def test_training_job(
     ringer_parquet_dataset: "RingerParquetDataset",
     isolated_executor,
 ):
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
     future = isolated_executor.submit(
         training_job_test_routine,
         tmp_path=tmp_path,
@@ -36,6 +38,12 @@ def training_job_test_routine(
     )
     import pandera.polars as pa
     from neuralnet.submitit import ExecutorConfig
+    from mlflow.tracking import MlflowClient
+
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
+    client = MlflowClient(tracking_uri=tracking_uri)
+    client.create_experiment("test_training_job", artifact_location=(tmp_path / "mlruns").as_uri())
 
     job_config = {
         "batch_size": 32,
@@ -71,17 +79,19 @@ def training_job_test_routine(
         "from_logits": False,
         "epochs": 1,
         "logger_name": None,
-        "output_path": None,  # To be set in the test
+        "experiment_name": "test_training_job",
+        "tracking_uri": tracking_uri,
+        "run_name": "main_training_run",
         "executor_config": None,  # To be set in the test
         "inits": 2,
         "best_init": {
             "key": "fit.val.max_sp",
-            "mode": "max",
+            "criterion": "max",
         },
         "best_fold": {
             "key": "fit.val.max_sp",
-            "mode": "max",
-        }
+            "criterion": "max",
+        },
     }
 
     job_config["dataset_dir"] = dataset_dir
@@ -95,17 +105,17 @@ def training_job_test_routine(
         slurm_partition="test",
     )
     job_config["executor_config"] = executor_config
-    job_config["output_path"] = tmp_path / "output"
 
     job = RingerKerasTrainingJob(**job_config)
     job.submit()
 
-    loaded_job = RingerKerasTrainingJob.load(job_config["output_path"])
+    assert job.run_id is not None, "job.run_id must be set after submit()"
+
+    loaded_job = RingerKerasTrainingJob.load(job.run_id, tracking_uri=tracking_uri)
     assert isinstance(loaded_job, RingerKerasTrainingJob), (
         "Loaded job is not of the expected type"
     )
     assert loaded_job == job, "Loaded job is not equal to the original job"
-    RingerKerasTrainingJob.validate_saved_directory(job_config["output_path"])
     assert isinstance(loaded_job.all_model_results, pl.DataFrame), (
         "Loaded job's all_model_results is not a Polars DataFrame"
     )
@@ -113,10 +123,48 @@ def training_job_test_routine(
         "Loaded job's selected_models is not a Polars DataFrame"
     )
     n_folds = ringer_parquet_dataset.get_n_folds()
-    assert loaded_job.all_model_results.height == n_folds * job.inits * len(
-        job.et_bins
-    ) * len(job.eta_bins)
+    expected_child_runs = n_folds * job.inits * len(job.et_bins) * len(job.eta_bins)
+    assert loaded_job.all_model_results.height == expected_child_runs
     assert loaded_job.selected_models.height == len(job.et_bins) * len(job.eta_bins)
+
+    # Verify MLflow parent & nested child runs, dot-separated params, metrics, and training_time
+    parent_run = client.get_run(job.run_id)
+    assert "model_factory.layers.0.units" in parent_run.data.params
+    assert "optimizer.learning_rate" in parent_run.data.params
+
+    child_runs = client.search_runs(
+        experiment_ids=[parent_run.info.experiment_id],
+        filter_string=f"tags.mlflow.parentRunId = '{job.run_id}'",
+    )
+    assert len(child_runs) == expected_child_runs
+    for c_run in child_runs:
+        assert "et_bin.low" in c_run.data.params
+        assert "eta_bin.high" in c_run.data.params
+        assert "training_time" in c_run.data.metrics
+        assert "fit.val.max_sp" in c_run.data.metrics
+        assert "history.train.loss" in c_run.data.metrics
+        assert "history.val.max_sp" in c_run.data.metrics
+
+    # Also test execution with LocalExecutor
+    local_logs_dir = tmp_path / "local_logs"
+    local_logs_dir.mkdir()
+    client.create_experiment("test_local_executor_job", artifact_location=(tmp_path / "mlruns_local").as_uri())
+    local_job_config = {
+        **job_config,
+        "inits": 1,
+        "experiment_name": "test_local_executor_job",
+        "executor_config": ExecutorConfig(
+            cpus_per_task=1,
+            executor_type="local",
+            logs_dir=local_logs_dir,
+            name="test_local_job",
+        ),
+    }
+    local_job = RingerKerasTrainingJob(**local_job_config)
+    local_job.submit()
+    loaded_local_job = RingerKerasTrainingJob.load(local_job.run_id, tracking_uri=tracking_uri)
+    assert loaded_local_job.all_model_results.height == n_folds * 1 * len(local_job.et_bins) * len(local_job.eta_bins)
+    assert loaded_local_job.selected_models.height == len(local_job.et_bins) * len(local_job.eta_bins)
 
     specialist_committee = loaded_job.get_specialist_committee()
     inference_input = ringer_parquet_dataset.predict_df()
@@ -199,6 +247,8 @@ def test_threshold_fit_job(
     runs the evaluation job against the same dataset directory.  Asserts that
     all expected output files are created with valid contents.
     """
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
     future = isolated_executor.submit(
         threshold_fit_job_test_routine,
         tmp_path=tmp_path,
@@ -226,11 +276,15 @@ def threshold_fit_job_test_routine(
         ReferencePoint,
     )
     from neuralnet.submitit import ExecutorConfig
+    from mlflow.tracking import MlflowClient
 
     # ------------------------------------------------------------------
     # Step 1: Train a minimal committee.
     # ------------------------------------------------------------------
-    training_output = tmp_path / "training_output"
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
+    client = MlflowClient(tracking_uri=tracking_uri)
+    client.create_experiment("test_threshold_fit", artifact_location=(tmp_path / "mlruns").as_uri())
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
 
@@ -268,19 +322,17 @@ def threshold_fit_job_test_routine(
         "from_logits": False,
         "epochs": 1,
         "logger_name": None,
-        "output_path": training_output,
+        "experiment_name": "test_threshold_fit",
+        "tracking_uri": tracking_uri,
         "executor_config": executor_config,
         "dataset_dir": dataset_dir,
         "inits": 1,
-        "best_init": {"key": "fit.val.max_sp", "mode": "max"},
-        "best_fold": {"key": "fit.val.max_sp", "mode": "max"},
+        "best_init": {"key": "fit.val.max_sp", "criterion": "max"},
+        "best_fold": {"key": "fit.val.max_sp", "criterion": "max"},
     }
 
     training_job = RingerKerasTrainingJob(**job_config)
     training_job.submit()
-
-    # Sanity check — training must have succeeded.
-    RingerKerasTrainingJob.validate_saved_directory(training_output)
 
     # ------------------------------------------------------------------
     # Step 2: Run the evaluation job.
@@ -293,7 +345,8 @@ def threshold_fit_job_test_routine(
     }
 
     eval_job = RingerCommitteeThresholdFitJob(
-        fit_job_path=training_output,
+        fit_job_run_id=training_job.run_id,
+        tracking_uri=tracking_uri,
         dataset_dir=dataset_dir,
         output_path=evaluation_output,
         references=references,
@@ -313,7 +366,7 @@ def threshold_fit_job_test_routine(
     results_df = pl.read_parquet(eval_job.results_path)
     assert isinstance(results_df, pl.DataFrame), "results.parquet is not a DataFrame"
 
-    loaded_training_job = RingerKerasTrainingJob.load(training_output)
+    loaded_training_job = RingerKerasTrainingJob.load(training_job.run_id, tracking_uri=tracking_uri)
     n_selected = loaded_training_job.selected_models.height
     assert results_df.height == n_selected, (
         f"Expected {n_selected} rows in results.parquet, got {results_df.height}"
@@ -438,6 +491,8 @@ def test_committee_inference_job(
     inference job against the same dataset directory.  Asserts that the
     output parquet file has the expected columns and row count.
     """
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
     future = isolated_executor.submit(
         committee_inference_job_test_routine,
         tmp_path=tmp_path,
@@ -468,11 +523,15 @@ def committee_inference_job_test_routine(
     )
     from neuralnet.workflows.ringer.inference import RingerCommitteeInferenceJob
     from neuralnet.submitit import ExecutorConfig
+    from mlflow.tracking import MlflowClient
 
     # ------------------------------------------------------------------
     # Step 1: Train a minimal committee.
     # ------------------------------------------------------------------
-    training_output = tmp_path / "training_output"
+    tracking_uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    logging.info(f"MLflow tracking_uri: {tracking_uri}")
+    client = MlflowClient(tracking_uri=tracking_uri)
+    client.create_experiment("test_inference", artifact_location=(tmp_path / "mlruns").as_uri())
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
 
@@ -510,17 +569,17 @@ def committee_inference_job_test_routine(
         "from_logits": False,
         "epochs": 1,
         "logger_name": None,
-        "output_path": training_output,
+        "experiment_name": "test_inference",
+        "tracking_uri": tracking_uri,
         "executor_config": executor_config,
         "dataset_dir": dataset_dir,
         "inits": 1,
-        "best_init": {"key": "fit.val.max_sp", "mode": "max"},
-        "best_fold": {"key": "fit.val.max_sp", "mode": "max"},
+        "best_init": {"key": "fit.val.max_sp", "criterion": "max"},
+        "best_fold": {"key": "fit.val.max_sp", "criterion": "max"},
     }
 
     training_job = RingerKerasTrainingJob(**job_config)
     training_job.submit()
-    RingerKerasTrainingJob.validate_saved_directory(training_output)
 
     # ------------------------------------------------------------------
     # Step 2: Run the threshold-fit job with multiple references.
@@ -532,7 +591,8 @@ def committee_inference_job_test_routine(
     }
 
     eval_job = RingerCommitteeThresholdFitJob(
-        fit_job_path=training_output,
+        fit_job_run_id=training_job.run_id,
+        tracking_uri=tracking_uri,
         dataset_dir=dataset_dir,
         output_path=evaluation_output,
         references=references,

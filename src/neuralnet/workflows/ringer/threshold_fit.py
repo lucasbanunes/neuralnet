@@ -117,7 +117,6 @@ After :meth:`RingerCommitteeThresholdFitJob.submit` completes, the
 
 import json
 import logging
-import shutil
 from functools import cached_property
 from itertools import product
 from pathlib import Path
@@ -291,17 +290,26 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
     # Required fields
     # ------------------------------------------------------------------
 
-    fit_job_path: Annotated[
-        Path,
+    fit_job_run_id: Annotated[
+        str,
         Field(
             description=(
-                "Path to the output directory of a completed "
-                "RingerKerasTrainingJob.  Used to load the trained models and "
-                "their metadata."
+                "MLflow run ID of a completed RingerKerasTrainingJob. "
+                "Used to load the trained models and their metadata."
             ),
         ),
-        PlainSerializer(str, return_type=str),
     ]
+
+    tracking_uri: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional MLflow tracking URI used when loading the training job. "
+                "Uses MLFLOW_TRACKING_URI or default local store when None."
+            ),
+        ),
+    ] = None
 
     dataset_dir: DirectoryType
 
@@ -507,14 +515,14 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
            thresholds, and relative paths to the model files in ``models/``.
         """
         logger = logging.getLogger(self.logger_name)
-        logger.info(f"Starting threshold-fit job. fit_job_path={self.fit_job_path}, output_path={self.output_path}")
+        logger.info(f"Starting threshold-fit job. fit_job_run_id={self.fit_job_run_id}, output_path={self.output_path}")
         self.output_path.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
         # Persist configuration for reproducibility.
         self.config_path.write_text(self.model_dump_json(indent=4), encoding="utf-8")
 
-        training_job = RingerKerasTrainingJob.load(self.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(self.fit_job_run_id, tracking_uri=self.tracking_uri)
         dataset_kwargs = self._resolve_dataset_kwargs(training_job)
         specialist_committee = training_job.get_specialist_committee(
             et_col=dataset_kwargs["et_col"],
@@ -538,13 +546,9 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
             member_dir = self.get_member_dir(model_id)
             member_dir.mkdir(parents=True, exist_ok=True)
 
-            # Export/copy specialist model to models/member_{id}/model.keras
+            # Export specialist model to models/member_{id}/model.keras
             member_model_file = self.get_member_model_path(model_id)
-            orig_model_path = training_job.get_member_model_path(model_id)
-            if orig_model_path.exists():
-                shutil.copy2(orig_model_path, member_model_file)
-            else:
-                specialist.keras_model.save(member_model_file)
+            specialist.keras_model.save(member_model_file)
 
             logger.info(f"{i} - Evaluating member {model_id}: et_bin={et_bin}, eta_bin={eta_bin}")
 

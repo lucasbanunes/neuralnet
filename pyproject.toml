@@ -10,6 +10,7 @@ dependencies = [
     "hgq2==0.2.0",
     "jupyterlab>=4.6.4",
     "matplotlib==3.10.8",
+    "mlflow>=3.17.2",
     "mplhep==1.1.2",
     "pandas==3.0.0",
     "pandera==0.30.1",

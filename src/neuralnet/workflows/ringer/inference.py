@@ -295,7 +295,10 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
         # Step 1: Load threshold-fit job and resolve column/table overrides.
         # ------------------------------------------------------------------
         threshold_fit_job = RingerCommitteeThresholdFitJob.load(self.job_path)
-        training_job = RingerKerasTrainingJob.load(threshold_fit_job.fit_job_path)
+        training_job = RingerKerasTrainingJob.load(
+            threshold_fit_job.fit_job_run_id,
+            tracking_uri=threshold_fit_job.tracking_uri,
+        )
         dataset_kwargs = self._resolve_dataset_kwargs(training_job)
 
         logger.info(f"Loaded threshold-fit job from {self.job_path}. Resolved dataset_kwargs={dataset_kwargs}")
@@ -342,17 +345,15 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
         )
 
         predicted_df = dataset.predict_df()
-        selection_cols = {'id'}
+        selection_cols = {"id"}
         for op_point, committee in committees.items():
             logger.info(
                 f"Running inference for operating point '{op_point}' with {len(committee.models)} specialist members."
             )
             rename_map = {col: f"{op_point}.{col}" for col in committee.output_cols if col != "id"}
             selection_cols.update(rename_map.values())
-            predicted_df = (
-                predicted_df
-                .pipe(committee.predict, batch_size=self.batch_size, passthrough=True)
-                .rename(rename_map)
+            predicted_df = predicted_df.pipe(committee.predict, batch_size=self.batch_size, passthrough=True).rename(
+                rename_map
             )
         predicted_df = predicted_df.select(*sorted(selection_cols))
 
