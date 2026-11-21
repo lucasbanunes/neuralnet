@@ -1,5 +1,13 @@
 #!/usr/bin/env python
+import warnings
 from itertools import product
+
+warnings.warn(
+    "neuralnet.models.vkan is deprecated and will be removed in a future release. "
+    "Use neuralnet.models.KANFactory with the Ringer YAML workflows instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 from pathlib import Path
 import re
 from typing import Annotated, TYPE_CHECKING

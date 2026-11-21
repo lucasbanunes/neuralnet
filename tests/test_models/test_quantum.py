@@ -1,12 +1,12 @@
-import pytest
 import numpy as np
+import pytest
 
 
 @pytest.mark.parametrize(
     ("class_name", "kwargs", "name"),
     [
         (
-            "BasicEntanglerQuantumLayer",
+            "BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory",
             {
                 "n_qubits": 2,
                 "n_layers": 2,
@@ -17,7 +17,7 @@ import numpy as np
             "basic_entangler",
         ),
         (
-            "StronglyEntanglingQuantumLayer",
+            "StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory",
             {
                 "n_qubits": 3,
                 "n_layers": 1,
@@ -28,7 +28,7 @@ import numpy as np
             "strongly_entangling",
         ),
         (
-            "HardwareEfficientQuantumLayer",
+            "HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory",
             {
                 "n_qubits": 4,
                 "n_layers": 2,
@@ -40,9 +40,7 @@ import numpy as np
         ),
     ],
 )
-def test_quantum_layer_config_returns_torch_module_wrapper(
-    class_name: str, kwargs: dict, name: str, isolated_executor
-):
+def test_quantum_layer_config_returns_torch_module_wrapper(class_name: str, kwargs: dict, name: str, isolated_executor):
     future = isolated_executor.submit(
         quantum_layer_config_returns_torch_module_wrapper,
         class_name=class_name,
@@ -58,38 +56,49 @@ def quantum_layer_config_returns_torch_module_wrapper(
     name: str,
 ):
     import os
+
     os.environ["KERAS_BACKEND"] = "torch"
     import keras
-    from neuralnet.models import quantum
+
+    from neuralnet.layers import quantum
 
     config_cls = getattr(quantum, class_name)
-    config: quantum.QuantumLayer = config_cls(**kwargs)
+    config: quantum.QuantumLayerFactory = config_cls(**kwargs)
 
     assert config.diff_method == kwargs.get("diff_method", "backprop")
     assert config.shots == kwargs.get("shots")
     assert config.name == name
 
-    layer = config.get()
+    layer = config.as_keras()
 
     assert isinstance(layer, keras.layers.TorchModuleWrapper), (
-        "Expected instance of 'TorchModuleWrapper', got '{}'".format(
-            type(layer).__name__
-        )
+        f"Expected instance of 'TorchModuleWrapper', got '{type(layer).__name__}'"
     )
-    assert str(layer.output_shape) == str(
-        kwargs.get("output_shape", (None, kwargs["n_qubits"]))
-    )
+    assert str(layer.output_shape) == str(kwargs.get("output_shape", (None, kwargs["n_qubits"])))
     assert layer.name == kwargs["name"]
 
     batch = 2
     inp = np.random.RandomState(42).randn(batch, kwargs["n_qubits"]).astype(np.float32)
     out = layer(inp)
 
-    # convert to numpy if this is a tensor-like object
-    try:
-        out_np = out.detach().cpu().numpy()
-    except Exception:
-        out_np = np.array(out)
+    out_np = out.detach().cpu().numpy() if hasattr(out, "detach") else np.array(out)
 
     expected_dim = kwargs.get("output_shape", (None, kwargs["n_qubits"]))[1]
     assert out_np.shape == (batch, expected_dim)
+
+
+def test_quantum_layer_rejects_tensorflow_backend(isolated_executor):
+    future = isolated_executor.submit(_quantum_layer_rejects_tf_routine)
+    future.result()
+
+
+def _quantum_layer_rejects_tf_routine():
+    import os
+
+    os.environ["KERAS_BACKEND"] = "tensorflow"
+
+    from neuralnet.layers.quantum import BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory
+
+    factory = BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory(n_qubits=2, n_layers=1)
+    with pytest.raises(ValueError, match="KERAS_BACKEND=torch"):
+        factory.as_keras()

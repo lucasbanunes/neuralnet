@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from keras import Sequential
 
 from itertools import product
-from pydantic import AfterValidator, Field, ConfigDict, BaseModel, PlainSerializer
+from pydantic import AfterValidator, Field, BaseModel
 import logging
 from pathlib import Path
 import numpy as np
@@ -27,7 +27,6 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 # from ...json import cast_to_json_value
 from ...submitit import ExecutorConfig
-from ...logging import LoggerName
 from ...datasets.ringer import (
     RingerParquetDataset,
     DataTableType,
@@ -38,33 +37,30 @@ from ...datasets.ringer import (
 )
 from ...models.keras.factories import (
     EpochsType,
-    VerboseType,
     FitRoutineDict,
     LossType,
     OptimizerType,
+    VerboseType,
 )
-from ...models.binned_committee import VariableBin
-from .models import BinnedSpecialistCommittee, BinnedSpecialistModel, NormStrategyType
+from ...bins import (
+    AbsoluteBin,
+    AbsoluteBinDict,
+    AbsoluteVariableBin,
+    Bin,
+    BinDict,
+    VariableBin,
+)
+from ...models import ModelFactoryType
+from ...models.committee import BinnedSpecialistCommittee, BinnedSpecialistModel, NormStrategyType
 from .fields import RingFractionType
-from ...models.dense import (
-    MLPFactory,
-    FixedPointQuantizedMLP,
-)
 from ...utils import traverse
 from ...normalizers.factories import FixedPointAlternativeNormL1
 from ...normalizers.polars import AlternativeNorm1, FixedPointQuantizedAlternativeNorm1
 from ...utils.polars import RingSlicesPerLayer
 from ...datasets import DirectoryType
-from ...pydantic import YamlBaseModel
-from ...bins import (
-    Bin,
-    BinDict,
-    AbsoluteVariableBin,
-    AbsoluteBin,
-    AbsoluteBinDict,
-)
+from ..base import BaseActivity
+from ...quantization.base import get_custom_objects
 from ...quantization.quantizers import FixedPointQuantizer
-from ...quantization.keras import FixedPointQuantizationDense
 
 type BalanceClassWeightsType = Annotated[
     bool,
@@ -406,9 +402,7 @@ class BinDict(TypedDict):
     closed: Literal["left", "right", "both", "neither"]
 
 
-class RingerKerasTrainingJob(YamlBaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
+class RingerKerasTrainingJob(BaseActivity):
     # Dataset params
     batch_size: BatchSizeType = 32
     data_table: DataTableType
@@ -425,14 +419,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
     ring_fraction: RingFractionType = 2
 
     # Model params
-    model_factory: Annotated[
-        MLPFactory | FixedPointQuantizedMLP,
-        Field(
-            ...,
-            discriminator="object_type",
-            description="Description of the MLP model to train.",
-        ),
-    ]
+    model_factory: ModelFactoryType
     from_logits: FromLogitsType = False
     epochs: EpochsType = 5000
     verbose: VerboseType = 1
@@ -461,12 +448,6 @@ class RingerKerasTrainingJob(YamlBaseModel):
     # Execution related fields
     dry_run: Annotated[bool, Field(description="Perform a dry run without actually training")] = False
     executor_config: ExecutorConfigType
-    output_path: Annotated[
-        Path, Field(description="Path to save the results of the job"), PlainSerializer(str, return_type=str)
-    ]
-
-    # Misc
-    logger_name: LoggerName = None
 
     # Model Selection
     best_init: SelectionCriteria = Field(
@@ -490,10 +471,6 @@ class RingerKerasTrainingJob(YamlBaseModel):
     # @cached_property
     # def thresholds_array(self) -> npt.NDArray[np.floating]:
     #     return np.array(self.thresholds)
-
-    @cached_property
-    def config_path(self) -> Path:
-        return self.output_path / "config.json"
 
     @cached_property
     def all_models_results_path(self) -> Path:
@@ -731,10 +708,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
 
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting job with model {self.model_factory.name} on dataset at {self.dataset_dir}")
-        self.output_path.mkdir(parents=True, exist_ok=True)
-        config_dict = self.model_dump()
-        config_dict.pop("output_path")
-        self.output_path.joinpath("config.json").write_text(json.dumps(config_dict, indent=4), encoding="utf-8")
+        self.dump_config()
 
         dataset = RingerParquetDataset(
             dataset_dir=self.dataset_dir,
@@ -1044,9 +1018,7 @@ class RingerKerasTrainingJob(YamlBaseModel):
         model_path = member_output_dir / "model.keras"
         if not model_path.exists():
             raise FileNotFoundError(f"Model file not found at {model_path}")
-        model: Model = load_model(
-            model_path, custom_objects={"FixedPointQuantizationDense": FixedPointQuantizationDense}
-        )
+        model: Model = load_model(model_path, custom_objects=get_custom_objects())
 
         if not with_results:
             return model

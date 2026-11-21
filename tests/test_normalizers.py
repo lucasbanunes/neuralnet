@@ -100,3 +100,22 @@ def test_fixed_point_quantized_alternative_norm1_quantizes_dataframe_and_lazyfra
         result = result.collect()
 
     assert_frame_equal(result, expected_result, check_dtype=True)
+
+
+def test_fixed_point_alternative_norm_l1_factory_reuses_quantizer_validation():
+    from pydantic import ValidationError
+
+    from neuralnet.normalizers.factories import FixedPointAlternativeNormL1
+
+    factory = FixedPointAlternativeNormL1(integer_bits=1, fractional_bits=2)
+    transform = factory.as_polars_transform(["a", "b"])
+    assert isinstance(transform, FixedPointQuantizedAlternativeNorm1)
+    assert transform.quantizer.integer_bits == 1
+    assert transform.quantizer.fractional_bits == 2
+
+    with pytest.raises(ValidationError):
+        FixedPointAlternativeNormL1(integer_bits=0, fractional_bits=2)
+
+    with pytest.raises(ValidationError):
+        FixedPointAlternativeNormL1(integer_bits=1, floating_bits=2)
+

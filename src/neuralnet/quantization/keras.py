@@ -4,12 +4,12 @@ This module contains the project's bespoke Keras-based quantization layers and
 helpers for converting Sequential models into fixed-point quantized versions.
 """
 
-from keras import activations, ops, initializers, Sequential, saving
-from keras.layers import Layer, Dense, Activation
+from keras import Sequential, activations, initializers, ops, saving
+from keras.layers import Activation, Dense, Layer
 
 
 @ops.custom_gradient
-def fixed_point_quantizer(x, integer_bits: int, floating_bits: int):
+def fixed_point_quantizer(x, integer_bits: int, fractional_bits: int):
     """Quantize values to a fixed-point grid with straight-through gradients.
 
     Parameters
@@ -18,7 +18,7 @@ def fixed_point_quantizer(x, integer_bits: int, floating_bits: int):
         Input values to quantize.
     integer_bits : int
         Number of integer bits used to define the representable range.
-    floating_bits : int
+    fractional_bits : int
         Number of fractional bits used to define the quantization step.
 
     Returns
@@ -28,11 +28,11 @@ def fixed_point_quantizer(x, integer_bits: int, floating_bits: int):
     """
     # Forward pass: quantize the input
     # saturated_x = clip(x, lower_bound, upper_bound)
-    floating_power = 2**floating_bits
+    scale = 2**fractional_bits
     lower_bound = -(2**integer_bits)
-    upper_bound = (2**integer_bits) - (2 ** (-floating_bits))
-    int_x = ops.round(x * floating_power)
-    quantized_x = int_x / floating_power
+    upper_bound = (2**integer_bits) - (2 ** (-fractional_bits))
+    int_x = ops.round(x * scale)
+    quantized_x = int_x / scale
     clipped_quantized_x = ops.clip(quantized_x, lower_bound, upper_bound)
 
     # Backward pass computation
@@ -68,7 +68,7 @@ class FixedPointQuantizationDense(Layer):
 
     def __init__(
         self,
-        floating_bits: int,
+        fractional_bits: int,
         integer_bits: int,
         units: int,
         activation: str | None = None,
@@ -80,7 +80,7 @@ class FixedPointQuantizationDense(Layer):
 
         Parameters
         ----------
-        floating_bits : int
+        fractional_bits : int
             Number of fractional bits used by the quantizer.
         integer_bits : int
             Number of integer bits used by the quantizer.
@@ -97,13 +97,13 @@ class FixedPointQuantizationDense(Layer):
             Additional keyword arguments forwarded to the base layer.
         """
         super().__init__(**kwargs)
-        self._floating_bits_val = int(floating_bits)
+        self._fractional_bits_val = int(fractional_bits)
         self._integer_bits_val = int(integer_bits)
         # Casting so keras can make the bits operation with float32 tensors
-        self.floating_bits = self.add_weight(
-            name="floating_bits",
+        self.fractional_bits = self.add_weight(
+            name="fractional_bits",
             shape=(),
-            initializer=initializers.Constant(floating_bits),
+            initializer=initializers.Constant(fractional_bits),
             trainable=False,
         )
         self.integer_bits = self.add_weight(
@@ -156,12 +156,12 @@ class FixedPointQuantizationDense(Layer):
             addition, and optional activation.
         """
         # Apply quantization to the kernel weights
-        quantized_kernel = fixed_point_quantizer(self.kernel, self.integer_bits, self.floating_bits)
-        quantized_bias = fixed_point_quantizer(self.bias, self.integer_bits, self.floating_bits)
+        quantized_kernel = fixed_point_quantizer(self.kernel, self.integer_bits, self.fractional_bits)
+        quantized_bias = fixed_point_quantizer(self.bias, self.integer_bits, self.fractional_bits)
         matmul = ops.matmul(inputs, quantized_kernel)
-        quantized_matmul = fixed_point_quantizer(matmul, self.integer_bits, self.floating_bits)
+        quantized_matmul = fixed_point_quantizer(matmul, self.integer_bits, self.fractional_bits)
         added_bias = ops.add(quantized_matmul, quantized_bias)
-        added_bias = fixed_point_quantizer(added_bias, self.integer_bits, self.floating_bits)
+        added_bias = fixed_point_quantizer(added_bias, self.integer_bits, self.fractional_bits)
         if self.activation_fn is not None:
             return self.activation_fn(added_bias)
         return added_bias
@@ -177,7 +177,7 @@ class FixedPointQuantizationDense(Layer):
         config = super().get_config()
         config.update(
             {
-                "floating_bits": self._floating_bits_val,
+                "fractional_bits": self._fractional_bits_val,
                 "integer_bits": self._integer_bits_val,
                 "units": self.units,
                 "activation": self.activation,
@@ -194,7 +194,7 @@ type FixedPointQuantizationLayerTypes = FixedPointQuantizationDense | Activation
 
 
 def fixed_point_quantize_layer(
-    layer: SuportedFixedPointQuantizationTypes, floating_bits: int, integer_bits: int
+    layer: SuportedFixedPointQuantizationTypes, fractional_bits: int, integer_bits: int
 ) -> FixedPointQuantizationLayerTypes:
     """Convert a supported Keras layer into a fixed-point quantized layer.
 
@@ -202,7 +202,7 @@ def fixed_point_quantize_layer(
     ----------
     layer : Dense or Activation
         Layer to convert.
-    floating_bits : int
+    fractional_bits : int
         Number of fractional bits used by the quantizer.
     integer_bits : int
         Number of integer bits used by the quantizer.
@@ -218,11 +218,8 @@ def fixed_point_quantize_layer(
         If the layer type is not supported.
     """
     if isinstance(layer, Dense):
-        # if layer.use_bias:
-        #     raise NotImplementedError(
-        #         "Fixed-point quantization for Dense layers with bias is not implemented yet.")
         quantized_layer = FixedPointQuantizationDense(
-            floating_bits=floating_bits,
+            fractional_bits=fractional_bits,
             integer_bits=integer_bits,
             units=layer.units,
             activation=layer.activation,
@@ -247,7 +244,7 @@ def fixed_point_quantize_layer(
 
 
 def fixed_point_quantize(
-    model: "Sequential", floating_bits: int, integer_bits: int, name: str | None = None
+    model: "Sequential", fractional_bits: int, integer_bits: int, name: str | None = None
 ) -> "Sequential":
     """Quantize all supported layers in a Keras Sequential model.
 
@@ -255,7 +252,7 @@ def fixed_point_quantize(
     ----------
     model : keras.Sequential
         Source model to convert.
-    floating_bits : int
+    fractional_bits : int
         Number of fractional bits used by the quantizer.
     integer_bits : int
         Number of integer bits used by the quantizer.
@@ -268,13 +265,13 @@ def fixed_point_quantize(
     keras.Sequential
         A new Sequential model built from fixed-point quantized layers.
     """
-    from keras import Sequential, Input
+    from keras import Input, Sequential
 
     quantized_layers = [
         Input(shape=model.input_shape[1:]),
     ]
     for layer in model.layers:
-        quantized_layer = fixed_point_quantize_layer(layer, floating_bits=floating_bits, integer_bits=integer_bits)
+        quantized_layer = fixed_point_quantize_layer(layer, fractional_bits=fractional_bits, integer_bits=integer_bits)
         quantized_layers.append(quantized_layer)
     if name is None:
         name = f"{model.name}_quantized"

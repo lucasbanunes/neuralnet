@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 import numpy as np
 from sklearn.metrics import roc_curve
 

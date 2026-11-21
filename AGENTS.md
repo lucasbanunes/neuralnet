@@ -37,44 +37,54 @@ The `neuralnet` repository develops machine learning models and quantization pip
 The repository follows a modular architecture separating datasets, models, quantization, workflows, and execution:
 
 ```
-neuralnet/
+src/neuralnet/
 ├── cli.py                               # Typer CLI entrypoint exposing `ringer` command group
 │
-├── neuralnet/
-│   ├── workflows/
-│   │   └── ringer/
-│   │       ├── cli.py                   # Typer subcommands for ringer workflows
-│   │       ├── training.py              # RingerKerasTrainingJob (FP & QAT training)
-│   │       ├── threshold_fit.py         # RingerCommitteeThresholdFitJob (operating point fitting)
-│   │       ├── inference.py             # RingerCommitteeInferenceJob (streaming parquet inference)
-│   │       ├── alternative_norm1.py     # AlternativeNorm1Analysis (quantization analysis)
-│   │       ├── models.py                # BinnedSpecialistModel & BinnedSpecialistCommittee
-│   │       └── fields.py                # Pydantic field validators & aliases
-│   │
-│   ├── models/
-│   │   ├── dense.py                     # DenseFactory, MLPFactory, FixedPointQuantizedMLP
-│   │   ├── binned_committee.py          # Generic binned specialist container
-│   │   ├── kan.py / vkan.py             # Kolmogorov–Arnold Networks
-│   │   └── quantum.py                   # Pennylane quantum neural layers
-│   │
-│   ├── quantization/
-│   │   ├── quantizers.py                # FixedPointQuantizer (bitwidth & fractional math)
-│   │   ├── keras.py                     # FixedPointQuantizationDense Keras layers
-│   │   └── hgq.py                       # Heterogeneous Graphical Quantization (HGQ2) configs
-│   │
-│   ├── normalizers/
-│   │   ├── polars.py                    # AlternativeNorm1 & FixedPointQuantizedAlternativeNorm1
-│   │   └── factories.py                 # Pydantic factories for normalizers
-│   │
-│   ├── datasets/
-│   │   ├── ringer.py                    # RingerParquetDataset & fold split management
-│   │   └── __init__.py                  # Base ParquetDataset wrapper
-│   │
-│   ├── bins.py                          # VariableBin & AbsoluteVariableBin expressions
-│   ├── metrics.py                       # sp_index, enhanced_confusion_matrix, Polars metrics
-│   ├── submitit.py                      # ExecutorConfig (debug, local, slurm backend router)
-│   ├── plotting.py                      # Matplotlib & mplhep publication plots
-│   └── pydantic.py                      # YamlBaseModel & pydantic_to_markdown_schema
+├── workflows/
+│   ├── base.py                          # BaseActivity (YamlBaseModel) & register_activity_command
+│   └── ringer/
+│       ├── cli.py                       # Typer subcommands for ringer workflows
+│       ├── training.py                  # RingerKerasTrainingJob (FP, custom QAT & HGQ2 training)
+│       ├── threshold_fit.py             # RingerCommitteeThresholdFitJob (operating point fitting)
+│       ├── inference.py                 # RingerCommitteeInferenceJob (streaming parquet inference)
+│       ├── alternative_norm1.py         # AlternativeNorm1Analysis (quantization analysis)
+│       ├── models.py                    # Re-exports from neuralnet.models.committee
+│       └── fields.py                    # Pydantic field validators & aliases
+│
+├── layers/
+│   ├── __init__.py                      # Unified LayerType discriminated union
+│   ├── dense.py                         # DenseFactory, FixedPointQuantizedDenseFactory, HGQ2DenseFactory
+│   ├── kan.py                           # KAN1DLayerFactory (torch backend)
+│   └── quantum.py                       # PennyLane quantum layer factories (torch backend)
+│
+├── models/
+│   ├── __init__.py                      # Unified ModelFactoryType discriminated union
+│   ├── sequential.py                    # KerasSequentialModelFactory (list[LayerType])
+│   ├── mlp.py                           # MLPFactory (list[DenseLayerType])
+│   ├── kan.py                           # KANFactory (multi-layer KAN -> keras.Sequential)
+│   ├── committee.py                     # Canonical BinnedSpecialistModel & BinnedSpecialistCommittee
+│   └── vkan.py                          # Deprecated legacy VKAN module
+│
+├── quantization/
+│   ├── __init__.py                      # Pluggable quantization exports
+│   ├── base.py                          # KerasQuantizerProtocol, PolarsQuantizerProtocol, QuantizerConfig, get_custom_objects
+│   ├── quantizers.py                    # FixedPointQuantizer & CustomFixedPointQuantizer (integer_bits, fractional_bits)
+│   ├── keras.py                         # FixedPointQuantizationDense Keras layers
+│   └── hgq.py                           # HGQ2QuantizerConfig (k0, i0, f0, ic, fc with Constant/MinMax)
+│
+├── normalizers/
+│   ├── polars.py                        # AlternativeNorm1 & FixedPointQuantizedAlternativeNorm1
+│   └── factories.py                     # FixedPointAlternativeNormL1 (reusing FixedPointQuantizer)
+│
+├── datasets/
+│   ├── ringer.py                        # RingerParquetDataset & fold split management
+│   └── __init__.py                      # Base ParquetDataset wrapper
+│
+├── bins.py                              # VariableBin & AbsoluteVariableBin expressions
+├── metrics.py                           # sp_index, enhanced_confusion_matrix, Polars metrics
+├── submitit.py                          # ExecutorConfig (debug, local, slurm backend router)
+├── plotting.py                          # Matplotlib & mplhep publication plots
+└── pydantic.py                          # YamlBaseModel & pydantic_to_markdown_schema
 ```
 
 ---

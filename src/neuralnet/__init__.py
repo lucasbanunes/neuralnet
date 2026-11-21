@@ -37,7 +37,7 @@ def class_weight(target):
 def check_batch_size(target, batch_size):
     _, n_evt_per_class = np.unique(target, return_counts=True)
     batch_size = (
-        batch_size if np.min(n_evt_per_class) > batch_size else np.min(n_evt_per_class)
+        min(np.min(n_evt_per_class), batch_size)
     )
     return batch_size
 

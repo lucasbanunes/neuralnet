@@ -1,4 +1,5 @@
-from typing import Any, Iterable, Iterator
+from typing import Any
+from collections.abc import Iterable, Iterator
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 

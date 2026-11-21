@@ -1,5 +1,9 @@
-from typing import Any, Literal, TypedDict, Annotated
-from pydantic import Field, BaseModel, PrivateAttr
+"""Canonical PennyLane quantum layer factories for Keras 3 (torch backend)."""
+
+from itertools import pairwise
+from typing import Annotated, Any, Literal, TypedDict
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 type DiffMethodType = Annotated[
     Literal["best", "backprop", "adjoint", "parameter-shift", "finite-diff", "spsa"],
@@ -10,7 +14,7 @@ type DiffMethodType = Annotated[
 
 type NameType = Annotated[
     str | None,
-    Field(None, description="Optional Keras layer name for the wrapped circuit."),
+    Field(description="Optional Keras layer name for the wrapped circuit."),
 ]
 
 type DeviceNameType = Annotated[
@@ -35,9 +39,7 @@ type ShotsType = Annotated[
     ),
 ]
 
-type NQubitsType = Annotated[
-    int, Field(..., gt=0, description="Number of qubits used by the quantum circuit.")
-]
+type NQubitsType = Annotated[int, Field(gt=0, description="Number of qubits used by the quantum circuit.")]
 
 
 type AngleEmbeddingRotationType = Annotated[
@@ -55,7 +57,7 @@ class WeightShapesDict(TypedDict):
 class AngleEmbedding(BaseModel):
     object_type: Literal["angle_embedding"] = Field(
         "angle_embedding",
-        description='Quantum layer name. Uses "qml.AngleEmbedding".',
+        description='Quantum embedding name. Uses "qml.AngleEmbedding".',
     )
 
     rotation: AngleEmbeddingRotationType = "X"
@@ -88,7 +90,7 @@ type NLayersType = Annotated[
 class BasicEntanglerAnsatz(BaseModel):
     object_type: Literal["basic_entangler_ansatz"] = Field(
         "basic_entangler_ansatz",
-        description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
+        description='Quantum ansatz name. Uses "qml.BasicEntanglerLayers".',
     )
 
     n_layers: NLayersType = 2
@@ -123,10 +125,10 @@ class BasicEntanglerAnsatz(BaseModel):
 class StronglyEntanglingAnsatz(BaseModel):
     object_type: Literal["strongly_entangling_ansatz"] = Field(
         "strongly_entangling_ansatz",
-        description="Quantum layer name",
+        description='Quantum ansatz name. Uses "qml.StronglyEntanglingLayers".',
     )
 
-    n_layers: NLayersType
+    n_layers: NLayersType = 2
 
     _n_wires: int | None = PrivateAttr(None)
 
@@ -150,7 +152,7 @@ class StronglyEntanglingAnsatz(BaseModel):
         import pennylane as qml
 
         def ansatz(weights, wires):
-            qml.StronglyEntanglingAnsatz(weights, wires=wires)
+            qml.StronglyEntanglingLayers(weights, wires=wires)
 
         return ansatz
 
@@ -158,10 +160,10 @@ class StronglyEntanglingAnsatz(BaseModel):
 class HardwareEfficientAnsatz(BaseModel):
     object_type: Literal["hardware_efficient_ansatz"] = Field(
         "hardware_efficient_ansatz",
-        description="Quantum layer name. Uses a hardware-efficient Rot + CNOT ansatz.",
+        description="Quantum ansatz name. Uses a hardware-efficient Rot + CNOT ansatz.",
     )
 
-    n_layers: NLayersType
+    n_layers: NLayersType = 2
 
     _n_wires: int | None = PrivateAttr(None)
 
@@ -194,7 +196,7 @@ class HardwareEfficientAnsatz(BaseModel):
                         layer_weights[wire_index, 2],
                         wires=wire,
                     )
-                for left_wire, right_wire in zip(wire_list, wire_list[1:]):
+                for left_wire, right_wire in pairwise(wire_list):
                     qml.CNOT(wires=[left_wire, right_wire])
                 if len(wire_list) > 1:
                     qml.CNOT(wires=[wire_list[-1], wire_list[0]])
@@ -214,7 +216,7 @@ type AnsatzType = Annotated[
 class PauliZ(BaseModel):
     object_type: Literal["pauli_z"] = Field(
         "pauli_z",
-        description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
+        description='Quantum measurement operator. Uses "qml.PauliZ".',
     )
 
     def as_pennylane(self):
@@ -230,7 +232,7 @@ type UnaryOperatorType = Annotated[
     PauliZ,
     Field(
         discriminator="object_type",
-        description="A callable that takes a single argument and returns a transformed version of it. Used to apply unary operations to the quantum circuit outputs before returning them.",
+        description="Unary measurement operator applied to quantum circuit wires.",
     ),
 ]
 
@@ -238,20 +240,19 @@ type UnaryOperatorType = Annotated[
 class QuantumLayerFactory(BaseModel):
     object_type: Literal["quantum_layer"] = Field(
         "quantum_layer",
-        description='Quantum layer name. Uses "qml.BasicEntanglerLayers".',
+        description='Quantum layer identifier. Must be "quantum_layer".',
     )
 
     embedder: EmbedderType = Field(default_factory=AngleEmbedding)
     ansatz: AnsatzType = Field(default_factory=BasicEntanglerAnsatz)
-    unary_operator: UnaryOperatorType = Field(
-        default_factory=PauliZ,
-    )
+    unary_operator: UnaryOperatorType = Field(default_factory=PauliZ)
     n_qubits: NQubitsType
-    weight_shapes: WeightShapesDict
+    n_layers: NLayersType | None = None
     device_name: DeviceNameType = "default.qubit"
     diff_method: DiffMethodType = "backprop"
     shots: ShotsType = None
     output_qubits: OutputQubitsType = None
+    name: NameType = None
 
     def _validate_output_qubits(self):
         if self.output_qubits is None:
@@ -272,9 +273,16 @@ class QuantumLayerFactory(BaseModel):
                 f"output_qubits must be an int, a tuple of ints, or None. Got {type(self.output_qubits).__name__}."
             )
 
-    def model_post_init(self):
+    def model_post_init(self, context: Any, /) -> None:
         self._validate_output_qubits()
+        if self.n_layers is not None:
+            self.ansatz.n_layers = self.n_layers
         self.ansatz.n_wires = self.n_qubits
+
+    @property
+    def output_shape(self) -> tuple[None, int]:
+        assert isinstance(self.output_qubits, tuple)
+        return (None, len(self.output_qubits))
 
     def as_pennylane(self) -> tuple[Any, Any]:
         import pennylane as qml
@@ -287,13 +295,19 @@ class QuantumLayerFactory(BaseModel):
         ansatz_fn = self.ansatz.as_pennylane()
         unary_operator_fn = self.unary_operator.as_pennylane()
 
-        @qml.qnode(
-            device, interface="torch", diff_method=self.diff_method, shots=self.shots
-        )
-        def circuit_node(inputs, weights):
+        def circuit_fn(inputs, weights):
             embedder_fn(inputs, wires=range(self.n_qubits))
             ansatz_fn(weights, wires=range(self.n_qubits))
             return [qml.expval(unary_operator_fn(wires=i)) for i in self.output_qubits]
+
+        circuit_node = qml.QNode(
+            circuit_fn,
+            device,
+            interface="torch",
+            diff_method=self.diff_method,
+        )
+        if self.shots is not None:
+            circuit_node = qml.set_shots(self.shots)(circuit_node)
 
         return device, circuit_node
 
@@ -314,7 +328,8 @@ class QuantumLayerFactory(BaseModel):
         backend = keras.config.backend()
         if backend != "torch":
             raise ValueError(
-                f"Invalid Keras backend '{backend}'. Quantum layers require the 'torch' backend."
+                f"Incompatible Keras backend '{backend}' for layer '{type(self).__name__}' "
+                f"(object_type='{self.object_type}'). Set KERAS_BACKEND=torch to use PennyLane quantum layers."
             )
         torch_layer = self.as_torch()
         return TorchModuleWrapper(
@@ -340,19 +355,19 @@ class BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory(QuantumLayerFactory):
     )
     unary_operator: PauliZ = Field(
         default_factory=PauliZ,
-        description="A callable that takes a single argument and returns a transformed version of it. Used to apply unary operations to the quantum circuit outputs before returning them. Defaults to qml.PauliZ measurement.",
+        description="Unary measurement operator applied to the quantum circuit outputs. Defaults to qml.PauliZ.",
     )
 
 
 class StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory(QuantumLayerFactory):
     object_type: Literal["strongly_entangling"] = Field(
         "strongly_entangling",
-        description='Quantum layer name. Uses "qml.StronglyEntanglingAnsatz".',
+        description='Quantum layer name. Uses "qml.StronglyEntanglingLayers".',
     )
 
     ansatz: StronglyEntanglingAnsatz = Field(
         default_factory=StronglyEntanglingAnsatz,
-        description="PennyLane ansatz layer used to build the quantum circuit. Defaults to qml.StronglyEntanglingAnsatz.",
+        description="PennyLane ansatz layer used to build the quantum circuit. Defaults to qml.StronglyEntanglingLayers.",
     )
     embedder: AngleEmbedding = Field(
         default_factory=AngleEmbedding,
@@ -360,7 +375,7 @@ class StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory(QuantumLayerFacto
     )
     unary_operator: PauliZ = Field(
         default_factory=PauliZ,
-        description="A callable that takes a single argument and returns a transformed version of it. Used to apply unary operations to the quantum circuit outputs before returning them. Defaults to qml.PauliZ measurement.",
+        description="Unary measurement operator applied to the quantum circuit outputs. Defaults to qml.PauliZ.",
     )
 
 
@@ -380,5 +395,5 @@ class HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory(QuantumLayerFactor
     )
     unary_operator: PauliZ = Field(
         default_factory=PauliZ,
-        description="A callable that takes a single argument and returns a transformed version of it. Used to apply unary operations to the quantum circuit outputs before returning them. Defaults to qml.PauliZ measurement.",
+        description="Unary measurement operator applied to the quantum circuit outputs. Defaults to qml.PauliZ.",
     )

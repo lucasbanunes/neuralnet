@@ -53,8 +53,7 @@ class SP(Callback):
         logs['val_max_sp_threshold'] = thresholds[knee]
 
         if self.verbose:
-            logger.info("val_sp: {:.4f} (fa:{:.4f},pd:{:.4f}), patience: {}".format(sp[knee],
-                                                                                    fa[knee], pd[knee], self.count))
+            logger.info(f"val_sp: {sp[knee]:.4f} (fa:{fa[knee]:.4f},pd:{pd[knee]:.4f}), patience: {self.count}")
 
         if self.__best_sp < 0:
             self.__best_sp = sp[knee]

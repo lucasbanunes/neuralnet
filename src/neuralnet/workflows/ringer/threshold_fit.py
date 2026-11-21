@@ -136,11 +136,10 @@ from ...datasets.ringer import (
     RingsColType,
 )
 from ...json import cast_to_json_value
-from ...logging import LoggerName
 from ...metrics import enhanced_confusion_matrix_from_polars, polars_sp_index
-from ...pydantic import YamlBaseModel
+from ...models.committee import BinnedSpecialistCommittee
 from ...utils.polars import unnest_structs
-from .models import BinnedSpecialistCommittee
+from ..base import BaseActivity
 from .training import EtColType, EtaColType, RingerKerasTrainingJob
 
 
@@ -210,7 +209,7 @@ class ReferencePoint(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class RingerCommitteeThresholdFitJob(YamlBaseModel):
+class RingerCommitteeThresholdFitJob(BaseActivity):
     """Fit decision thresholds for a trained Ringer specialist committee.
 
     This job evaluates a previously trained committee (produced by
@@ -305,12 +304,6 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
 
     dataset_dir: DirectoryType
 
-    output_path: Annotated[
-        Path,
-        Field(description="Directory where evaluation outputs are written."),
-        PlainSerializer(str, return_type=str),
-    ]
-
     references: Annotated[
         dict[str, ReferencePoint],
         Field(
@@ -342,8 +335,6 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
         str,
         Field(description="Name of the model output (score) column."),
     ] = "output"
-
-    logger_name: LoggerName = None
 
     # ------------------------------------------------------------------
     # Optional dataset-schema overrides
@@ -416,11 +407,6 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
     # ------------------------------------------------------------------
     # Derived paths
     # ------------------------------------------------------------------
-
-    @cached_property
-    def config_path(self) -> Path:
-        """Path to the serialised job configuration JSON file."""
-        return self.output_path / "config.json"
 
     @cached_property
     def models_dir(self) -> Path:
@@ -508,11 +494,8 @@ class RingerCommitteeThresholdFitJob(YamlBaseModel):
         """
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting threshold-fit job. fit_job_path={self.fit_job_path}, output_path={self.output_path}")
-        self.output_path.mkdir(parents=True, exist_ok=True)
+        self.dump_config()
         self.models_dir.mkdir(parents=True, exist_ok=True)
-
-        # Persist configuration for reproducibility.
-        self.config_path.write_text(self.model_dump_json(indent=4), encoding="utf-8")
 
         training_job = RingerKerasTrainingJob.load(self.fit_job_path)
         dataset_kwargs = self._resolve_dataset_kwargs(training_job)

@@ -1,16 +1,14 @@
-from pydantic import BaseModel, Field
-from typing import Annotated, Literal, TypedDict
-from datetime import datetime
+"""Shared Keras training factory types and sequential model factory re-exports."""
 
-from ..dense import DenseFactory
-from ...layers.quantum import (
-    BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory,
-    StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory,
-    HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory,
-)
-from ..kan import KAN1DLayerFactory
-from ...losses.binary_loss import BinaryCrossEntropyLossFactory
-from ...optimizers.adam import AdamFactory
+from datetime import datetime
+from typing import Annotated, Literal, TypedDict
+
+from pydantic import Field
+
+from neuralnet.layers import LayerType
+from neuralnet.losses.binary_loss import BinaryCrossEntropyLossFactory
+from neuralnet.models.sequential import KerasSequentialModelFactory, NameType
+from neuralnet.optimizers.adam import AdamFactory
 
 EpochsType = Annotated[
     int,
@@ -32,14 +30,6 @@ type LossType = Annotated[
     Field(discriminator="object_type", description="Loss configuration field."),
 ]
 
-type NameType = Annotated[
-    str,
-    Field(
-        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
-        description="Name of the model. Must be a valid Python identifier.",
-    ),
-]
-
 type JitCompileType = Annotated[
     Literal["auto"] | bool,
     Field(
@@ -48,38 +38,10 @@ type JitCompileType = Annotated[
     ),
 ]
 
-type LayerType = Annotated[
-    (
-        DenseFactory
-        | BasicEntanglerQuantumLayerWithAnglerEmbeddingFactory
-        | StronglyEntanglingQuantumLayerWithAnglerEmbeddingFactory
-        | HardwareEfficientQuantumLayerWithAnglerEmbeddingFactory
-        | KAN1DLayerFactory
-    ),
-    Field(discriminator="object_type", description="Layer configuration field."),
-]
-
 type LayersType = Annotated[
     list[LayerType],
-    Field(..., min_items=1, description="List of model layers."),
+    Field(min_length=1, description="List of model layers."),
 ]
-
-
-class KerasSequentialModelFactory(BaseModel):
-    layers: LayersType
-    name: NameType = "keras_sequential"
-    object_type: Annotated[
-        Literal["keras_sequential"],
-        Field(
-            description="Discriminator field to identify the model type.",
-        )
-    ] = "keras_sequential"
-
-    def as_keras(self):
-        from keras import Sequential
-
-        layers = [layer.as_keras() for layer in self.layers]
-        return Sequential(layers, name=self.name)
 
 
 class StandardEvaluationDict(TypedDict):
@@ -97,3 +59,19 @@ class FitRoutineDict(TypedDict):
     val: FitDict
     start: datetime
     end: datetime
+
+
+__all__ = [
+    "EpochsType",
+    "FitDict",
+    "FitRoutineDict",
+    "JitCompileType",
+    "KerasSequentialModelFactory",
+    "LayerType",
+    "LayersType",
+    "LossType",
+    "NameType",
+    "OptimizerType",
+    "StandardEvaluationDict",
+    "VerboseType",
+]

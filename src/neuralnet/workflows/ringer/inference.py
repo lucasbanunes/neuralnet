@@ -54,13 +54,12 @@ from ...datasets.ringer import (
     RingsColType,
     RingerParquetDataset,
 )
-from ...logging import LoggerName
-from ...pydantic import YamlBaseModel
+from ..base import BaseActivity
 from .threshold_fit import RingerCommitteeThresholdFitJob
 from .training import EtColType, EtaColType, RingerKerasTrainingJob
 
 
-class RingerCommitteeInferenceJob(YamlBaseModel):
+class RingerCommitteeInferenceJob(BaseActivity):
     """Run full-dataset inference with a fitted Ringer specialist committee.
 
     This job loads a specialist committee previously trained and threshold-fitted
@@ -132,12 +131,6 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
 
     dataset_dir: DirectoryType
 
-    output_path: Annotated[
-        Path,
-        Field(description="Directory where inference outputs are written."),
-        PlainSerializer(str, return_type=str),
-    ]
-
     max_rows_per_file: Annotated[
         int,
         Field(
@@ -171,8 +164,6 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
             description="Batch size used for committee model inference.",
         ),
     ] = 1024
-
-    logger_name: LoggerName = None
 
     # ------------------------------------------------------------------
     # Optional dataset-schema overrides
@@ -248,11 +239,6 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
     # ------------------------------------------------------------------
 
     @cached_property
-    def config_path(self) -> Path:
-        """Path to the serialised job configuration JSON file."""
-        return self.output_path / "config.json"
-
-    @cached_property
     def inference_results_path(self) -> Path:
         """Path to the inference results parquet file.
 
@@ -286,10 +272,7 @@ class RingerCommitteeInferenceJob(YamlBaseModel):
         """
         logger = logging.getLogger(self.logger_name)
         logger.info(f"Starting inference job. job_path={self.job_path}, output_path={self.output_path}")
-        self.output_path.mkdir(parents=True, exist_ok=True)
-
-        # Persist configuration for reproducibility.
-        self.config_path.write_text(self.model_dump_json(indent=4), encoding="utf-8")
+        self.dump_config()
 
         # ------------------------------------------------------------------
         # Step 1: Load threshold-fit job and resolve column/table overrides.

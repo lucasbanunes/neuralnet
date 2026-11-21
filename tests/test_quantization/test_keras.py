@@ -1,5 +1,28 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
+from neuralnet.quantization.quantizers import CustomFixedPointQuantizer, FixedPointQuantizer
+
+
+def test_fixed_point_quantizer_rejects_legacy_floating_bits():
+    """Ensure legacy floating_bits is rejected with no retrocompatible alias."""
+    with pytest.raises(ValidationError):
+        FixedPointQuantizer(integer_bits=2, floating_bits=6)
+
+    with pytest.raises(ValidationError):
+        CustomFixedPointQuantizer(integer_bits=2, floating_bits=6)
+
+
+def test_fixed_point_quantizer_rejects_non_positive_bitwidths():
+    """Ensure non-positive bitwidths fail schema validation."""
+    with pytest.raises(ValidationError):
+        CustomFixedPointQuantizer(integer_bits=0, fractional_bits=6)
+
+    with pytest.raises(ValidationError):
+        CustomFixedPointQuantizer(integer_bits=2, fractional_bits=0)
+
 
 def test_fixed_point_quantization_dense_training_and_serialization(
     tmp_path: Path,
@@ -21,6 +44,7 @@ def _fixed_point_quantization_dense_routine(tmp_path: Path):
     import keras
     import numpy as np
     from sklearn.datasets import make_blobs
+
     from neuralnet.quantization.keras import (
         FixedPointQuantizationDense,
     )
@@ -34,12 +58,8 @@ def _fixed_point_quantization_dense_routine(tmp_path: Path):
     model = keras.Sequential(
         [
             keras.Input(shape=(4,)),
-            FixedPointQuantizationDense(
-                floating_bits=8, integer_bits=4, units=8, activation="relu"
-            ),
-            FixedPointQuantizationDense(
-                floating_bits=8, integer_bits=4, units=1, activation="sigmoid"
-            ),
+            FixedPointQuantizationDense(fractional_bits=8, integer_bits=4, units=8, activation="relu"),
+            FixedPointQuantizationDense(fractional_bits=8, integer_bits=4, units=1, activation="sigmoid"),
         ]
     )
 
@@ -53,7 +73,7 @@ def _fixed_point_quantization_dense_routine(tmp_path: Path):
     model.fit(X, y, epochs=40, batch_size=32, verbose=0)
 
     # 4. Check if metrics are good
-    loss, accuracy = model.evaluate(X, y, verbose=0)
+    _loss, accuracy = model.evaluate(X, y, verbose=0)
     assert accuracy > 0.90, f"Expected accuracy > 0.90, got {accuracy}"
 
     # 5. Save model to a file
@@ -97,9 +117,8 @@ def _fixed_point_quantize_sequential_routine(tmp_path: Path):
     import keras
     import numpy as np
     from sklearn.datasets import make_blobs
-    from neuralnet.quantization.keras import (
-        fixed_point_quantize,
-    )
+
+    from neuralnet.quantization.quantizers import CustomFixedPointQuantizer
 
     X, y = make_blobs(n_samples=300, centers=2, n_features=4, random_state=42)
     X = X.astype(np.float32)
@@ -116,9 +135,8 @@ def _fixed_point_quantize_sequential_routine(tmp_path: Path):
 
     # Verify that with a large number of bits, floating-point and quantized outputs are close
     fp_preds_before_fit = base_model.predict(X[:20], verbose=0)
-    high_precision_quant_model = fixed_point_quantize(
-        base_model, floating_bits=16, integer_bits=16
-    )
+    quantizer = CustomFixedPointQuantizer(integer_bits=16, fractional_bits=16)
+    high_precision_quant_model = quantizer.quantize_model(base_model)
     quant_preds_before_fit = high_precision_quant_model.predict(X[:20], verbose=0)
 
     np.testing.assert_allclose(
@@ -142,10 +160,11 @@ def _fixed_point_quantization_dense_initializers_routine():
     os.environ["KERAS_BACKEND"] = "tensorflow"
 
     import numpy as np
+
     from neuralnet.quantization.keras import FixedPointQuantizationDense
 
     layer = FixedPointQuantizationDense(
-        floating_bits=8,
+        fractional_bits=8,
         integer_bits=4,
         units=5,
         kernel_initializer="ones",
@@ -157,5 +176,7 @@ def _fixed_point_quantization_dense_initializers_routine():
     np.testing.assert_allclose(layer.get_weights()[1], np.ones((5,), dtype=np.float32))
 
     config = layer.get_config()
+    assert config["fractional_bits"] == 8
+    assert config["integer_bits"] == 4
     assert config["kernel_initializer"]["class_name"] == "Ones"
     assert config["bias_initializer"]["class_name"] == "Ones"

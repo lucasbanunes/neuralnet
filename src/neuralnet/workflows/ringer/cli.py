@@ -1,119 +1,57 @@
-import typer
-from typing import Annotated
-from pathlib import Path
-from ...pydantic import pydantic_to_markdown_schema
-from .training import RingerKerasTrainingJob
-from .threshold_fit import RingerCommitteeThresholdFitJob
-from .inference import RingerCommitteeInferenceJob
-from .alternative_norm1 import AlternativeNorm1Analysis
+"""Ringer Committee Typer CLI using uniform BaseActivity registration."""
 
+import typer
+
+from neuralnet.workflows.base import register_activity_command
+from neuralnet.workflows.ringer.alternative_norm1 import AlternativeNorm1Analysis
+from neuralnet.workflows.ringer.inference import RingerCommitteeInferenceJob
+from neuralnet.workflows.ringer.threshold_fit import RingerCommitteeThresholdFitJob
+from neuralnet.workflows.ringer.training import RingerKerasTrainingJob
 
 app = typer.Typer(help="Ringer Committee command line interface", rich_markup_mode="markdown")
 
-
-RUN_TRAINING_HELP = "Run Ringer Committtee Trigger Training jobs"
-
-
-@app.command(
-    short_help=RUN_TRAINING_HELP,
-    help=(
-        f"{RUN_TRAINING_HELP}\n\n"
+register_activity_command(
+    app=app,
+    name="training",
+    activity_cls=RingerKerasTrainingJob,
+    short_help="Run Ringer Committee Trigger Training jobs",
+    description=(
         "This command runs the training jobs for the Ringer Committee Trigger. "
-        "The configuration for the training jobs is provided through a YAML file. "
-        "The YAML file should follow the schema bellow:\n\n"
-        f"{pydantic_to_markdown_schema(RingerKerasTrainingJob)}"
+        "The configuration for the training jobs is provided through a YAML file."
     ),
 )
-def training(
-    config: Annotated[
-        Path,
-        typer.Option("--config", help="Path to the YAML configuration file for the training job"),
-    ],
-):
 
-    job = RingerKerasTrainingJob.from_yaml(config)
-    job.submit()
-
-
-RUN_THRESHOLD_FIT_HELP = "Run Ringer Committee threshold fit job"
-
-
-@app.command(
+register_activity_command(
+    app=app,
     name="threshold-fit",
-    short_help=RUN_THRESHOLD_FIT_HELP,
-    help=(
-        f"{RUN_THRESHOLD_FIT_HELP}\n\n"
+    activity_cls=RingerCommitteeThresholdFitJob,
+    short_help="Run Ringer Committee threshold fit job",
+    description=(
         "This command evaluates a trained Ringer Committee by running inference "
         "on a (potentially different) dataset and computing metrics at configurable "
-        "reference operating points.  "
-        "The configuration is provided through a YAML file. "
-        "The YAML file should follow the schema bellow:\n\n"
-        f"{pydantic_to_markdown_schema(RingerCommitteeThresholdFitJob)}"
+        "reference operating points. The configuration is provided through a YAML file."
     ),
 )
-def threshold_fit(
-    config: Annotated[
-        Path,
-        typer.Option(
-            "--config",
-            help="Path to the YAML configuration file for the threshold fit job",
-        ),
-    ],
-):
-    job = RingerCommitteeThresholdFitJob.from_yaml(config)
-    job.submit()
 
-
-RUN_INFERENCE_HELP = "Run Ringer Committee inference job"
-
-
-@app.command(
+register_activity_command(
+    app=app,
     name="inference",
-    short_help=RUN_INFERENCE_HELP,
-    help=(
-        f"{RUN_INFERENCE_HELP}\n\n"
+    activity_cls=RingerCommitteeInferenceJob,
+    short_help="Run Ringer Committee inference job",
+    description=(
         "This command runs full-dataset inference with a fitted Ringer Committee "
         "and saves the results as a parquet table keyed by ``id`` for later joining "
-        "with other tables.  "
-        "The configuration is provided through a YAML file. "
-        "The YAML file should follow the schema bellow:\n\n"
-        f"{pydantic_to_markdown_schema(RingerCommitteeInferenceJob)}"
+        "with other tables. The configuration is provided through a YAML file."
     ),
 )
-def inference(
-    config: Annotated[
-        Path,
-        typer.Option(
-            "--config",
-            help="Path to the YAML configuration file for the inference job",
-        ),
-    ],
-):
-    job = RingerCommitteeInferenceJob.from_yaml(config)
-    job.submit()
 
-
-RUN_ALTERNATIVE_NORM1_HELP = "Run AlternativeNorm1 quantization analysis"
-
-
-@app.command(
+register_activity_command(
+    app=app,
     name="alternative-norm1",
-    short_help=RUN_ALTERNATIVE_NORM1_HELP,
-    help=(
-        f"{RUN_ALTERNATIVE_NORM1_HELP}\n\n"
+    activity_cls=AlternativeNorm1Analysis,
+    short_help="Run AlternativeNorm1 quantization analysis",
+    description=(
         "This command analyzes the impact of fixed-point quantization on AlternativeNorm1 "
-        "by computing MSE, MAE, MAPE, and KL divergence across configurable bit ranges.\n\n"
-        f"{pydantic_to_markdown_schema(AlternativeNorm1Analysis)}"
+        "by computing MSE, MAE, MAPE, and KL divergence across configurable bit ranges."
     ),
 )
-def alternative_norm1(
-    config: Annotated[
-        Path,
-        typer.Option(
-            "--config",
-            help="Path to the YAML configuration file for the AlternativeNorm1 analysis",
-        ),
-    ],
-):
-    job = AlternativeNorm1Analysis.from_yaml(config)
-    job.submit()

@@ -13,20 +13,17 @@ import json
 from pathlib import Path
 from itertools import product
 from typing import Annotated, Self
-import numpy as np
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...pydantic import YamlBaseModel
+from ..base import BaseActivity
 from ...datasets import ParquetDataset, DirectoryType
 from ...datasets.ringer import (
-    RingerParquetDataset,
     DataTableType,
     RingsColType,
     KFoldTableType,
     LabelColType,
     FoldColType,
-    DataGroupType,
     EtBinType,
     EtaBinType,
 )
@@ -34,7 +31,7 @@ from .fields import RingFractionType
 from ...utils.polars import RingSlicesPerLayer
 from ...normalizers.polars import AlternativeNorm1
 from ... import get_logger
-from .training import EtColType, EtaColType, EtBinType, EtaBinType, ExecutorConfigType
+from .training import EtColType, EtaColType, EtBinType, EtaBinType
 
 
 RESULTS_COL_DESCRIPTIONS: dict[str, str] = {
@@ -261,7 +258,7 @@ def compute_norm_metrics(
     return metrics_df, sample_diffs_df
 
 
-class AlternativeNorm1Analysis(YamlBaseModel):
+class AlternativeNorm1Analysis(BaseActivity):
     """Workflow to analyze fixed-point quantization error of AlternativeNorm1.
 
     Compares unquantized normalized rings against fixed-point quantized normalized rings
@@ -300,13 +297,6 @@ class AlternativeNorm1Analysis(YamlBaseModel):
     eps: Annotated[float, Field(gt=0, description="Epsilon for numerical stability.")] = 1e-12
     hist_bins: Annotated[int, Field(gt=0, description="Number of histogram bins for value distribution KL.")] = 100
 
-    # Execution related fields
-    output_path: Annotated[
-        Path,
-        Field(
-            description="Directory path to save results.csv, config.json, README.md, and sample-wise differences parquet files."
-        ),
-    ]
     # executor_config: ExecutorConfigType
 
     def get_data(self) -> pl.LazyFrame:
@@ -618,7 +608,7 @@ diffs = pl.read_parquet("quantized/quantized_ib_{first_ib:04d}_fb_{first_fb:04d}
             if struct_cols:
                 csv_df = results_df.with_columns([pl.col(c).struct.json_encode() for c in struct_cols])
             csv_df.write_csv(output_dir / "results.csv")
-            output_dir.joinpath("config.json").write_text(self.model_dump_json(indent=4))
+            self.dump_config()
             readme_content = self.generate_readme_content(
                 results_df=results_df,
                 sample_diffs_df=quantized_df,

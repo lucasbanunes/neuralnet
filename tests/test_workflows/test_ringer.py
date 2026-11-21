@@ -54,11 +54,13 @@ def training_job_test_routine(
             "object_type": "mlp",
             "layers": [
                 {
+                    "object_type": "dense",
                     "units": 4,
                     "activation": "relu",
                     "name": "hidden_dense",
                 },
                 {
+                    "object_type": "dense",
                     "units": 1,
                     "activation": "sigmoid",
                     "name": "output_dense",
@@ -258,8 +260,8 @@ def threshold_fit_job_test_routine(
         "model_factory": {
             "object_type": "mlp",
             "layers": [
-                {"units": 4, "activation": "relu", "name": "hidden_dense"},
-                {"units": 1, "activation": "sigmoid", "name": "output_dense"},
+                {"object_type": "dense", "units": 4, "activation": "relu", "name": "hidden_dense"},
+                {"object_type": "dense", "units": 1, "activation": "sigmoid", "name": "output_dense"},
             ],
             "name": "mlp",
         },
@@ -364,7 +366,7 @@ def threshold_fit_job_test_routine(
             assert "threshold" in cm_df.columns
 
     # Operating-point JSON files must exist for each reference.
-    from neuralnet.workflows.ringer.models import BinnedSpecialistCommittee
+    from neuralnet.models.committee import BinnedSpecialistCommittee
 
     for ref_name in eval_job.references:
         op_json_path = eval_job.get_op_point_json_path(ref_name)
@@ -500,8 +502,8 @@ def committee_inference_job_test_routine(
         "model_factory": {
             "object_type": "mlp",
             "layers": [
-                {"units": 4, "activation": "relu", "name": "hidden_dense"},
-                {"units": 1, "activation": "sigmoid", "name": "output_dense"},
+                {"object_type": "dense", "units": 4, "activation": "relu", "name": "hidden_dense"},
+                {"object_type": "dense", "units": 1, "activation": "sigmoid", "name": "output_dense"},
             ],
             "name": "mlp",
         },
